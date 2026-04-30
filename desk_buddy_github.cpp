@@ -1,10 +1,12 @@
-// Deskbuddy V7
-// Pages: Home / Weather / Notes / Status
-
-// Setup:
-// 1. Update the WiFi credentials below.
-// 2. Upload to your ESP32.
-// 3. Open the device IP in a browser to adjust theme, timers, and location.
+// Desk Buddy V7
+// Nav: Home / Weather / Notes / Status
+// Full version
+// - KP dots replaced with Low / Medium / High / Extreme text
+// - KP level text uses same small font as wind direction and stays inside the box
+// - Wind + direction added to Weather page
+// - Wind direction uses Accent color
+// - Weather sun event field automatically shows Sunrise or Sunset, whichever is next
+// - Uptime added to Status page
 
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -66,9 +68,9 @@ TFT_eSprite sprSmall = TFT_eSprite(&tft);
 // =========================================================
 // LOCATION
 // =========================================================
-float LAT = 52.5200f;
-float LNG = 13.4050f;
-String locationName = "Berlin";
+float LAT = 67.2804f;
+float LNG = 14.4049f;
+String locationName = "Bodo";
 
 // =========================================================
 // THEME
@@ -88,7 +90,6 @@ const uint16_t COL_BLUE   = 0x041F;
 
 String textColorKey = "standard";
 String unitKey = "metric"; // metric = C/mm, imperial = F/in
-String regionFormatKey = "europe"; // europe = 24h + dd.mm.yyyy, us = 12h + mm/dd/yyyy
 
 // =========================================================
 // LAYOUT
@@ -167,6 +168,8 @@ String lastIpText = "";
 String lastUptimeText = "";
 String lastTempText = "";
 String lastRainText = "";
+String lastUvText = "";
+String lastUvLevelText = "";
 String lastKpText = "";
 String lastKpLevelText = "";
 String lastWindText = "";
@@ -200,6 +203,7 @@ static float tempMaxC = NAN;
 static float precipMm = NAN;
 static float windSpeedMs = NAN;
 static float windDirectionDeg = NAN;
+static float uvIndex = NAN;
 static time_t lastWeatherFetch = 0;
 static const uint32_t WEATHER_INTERVAL_SEC = 10 * 60;
 
@@ -275,43 +279,8 @@ static String ipText() {
   return WiFi.localIP().toString();
 }
 
-static bool useUsRegionFormat() {
-  return regionFormatKey == "us";
-}
-
-static String formatClockParts(const struct tm& tmValue, bool withSeconds) {
-  char buf[20];
-  const char* pattern = useUsRegionFormat()
-    ? (withSeconds ? "%I:%M:%S %p" : "%I:%M %p")
-    : (withSeconds ? "%H:%M:%S" : "%H:%M");
-  strftime(buf, sizeof(buf), pattern, &tmValue);
-  String out = String(buf);
-  if (useUsRegionFormat()) {
-    out.replace(" AM", " am");
-    out.replace(" PM", " pm");
-  }
-  return out;
-}
-
-static String formatDateParts(const struct tm& tmValue) {
-  char buf[32];
-  strftime(buf, sizeof(buf), useUsRegionFormat() ? "%a %m/%d/%Y" : "%a %d.%m.%Y", &tmValue);
-  return String(buf);
-}
-
 static String formatMinuteOfDay(int minOfDay) {
   if (minOfDay < 0) return "--:--";
-
-  if (useUsRegionFormat()) {
-    int hour24 = minOfDay / 60;
-    int minute = minOfDay % 60;
-    int hour12 = hour24 % 12;
-    if (hour12 == 0) hour12 = 12;
-    char buf[12];
-    snprintf(buf, sizeof(buf), "%d:%02d %s", hour12, minute, hour24 >= 12 ? "PM" : "AM");
-    return String(buf);
-  }
-
   char buf[6];
   snprintf(buf, sizeof(buf), "%02d:%02d", minOfDay / 60, minOfDay % 60);
   return String(buf);
@@ -382,6 +351,19 @@ static String kpLevelText() {
   if (kpIndex < 3.0f) return "Low";
   if (kpIndex < 5.0f) return "Medium";
   if (kpIndex < 7.0f) return "High";
+  return "Extreme";
+}
+
+static String uvText() {
+  return isnan(uvIndex) ? "UV --" : "UV " + String(uvIndex, 1);
+}
+
+static String uvLevelText() {
+  if (isnan(uvIndex)) return "--";
+  if (uvIndex < 3.0f) return "Low";
+  if (uvIndex < 6.0f) return "Moderate";
+  if (uvIndex < 8.0f) return "High";
+  if (uvIndex < 11.0f) return "Very High";
   return "Extreme";
 }
 
@@ -482,12 +464,6 @@ static String formatTimerClock(unsigned long totalSec) {
   return String(buf);
 }
 
-static String focusStatusText() {
-  if (focusTimerFinished) return "Done";
-  if (focusTimerRunning) return "Running";
-  return "Ready";
-}
-
 static String focusHintText() {
   if (focusTimerFinished) return "Tap to reset";
   if (focusTimerRunning) return String((focusDurationSec / 60UL)) + " min session";
@@ -506,7 +482,9 @@ static String lastSyncText() {
 
   struct tm tmSync;
   localtime_r(&lastSyncTime, &tmSync);
-  return "Sync " + formatClockParts(tmSync, false);
+  char buf[16];
+  strftime(buf, sizeof(buf), "Sync %H:%M", &tmSync);
+  return String(buf);
 }
 
 static String weekNumberText() {
@@ -528,7 +506,7 @@ static String timerDoneCountdownText() {
 }
 
 static String homeTitleText() {
-  return buddyNickname.length() > 0 ? buddyNickname : "Deskbuddy";
+  return buddyNickname.length() > 0 ? buddyNickname : "Desk Buddy";
 }
 
 int sanitizeTimerMinutes(int value) {
@@ -758,12 +736,11 @@ void loadStoredSettings() {
 
   notesText        = prefs.getString("notes", "No notes yet.");
   buddyNickname    = prefs.getString("nickname", "");
-  locationName     = prefs.getString("locname", "Berlin");
-  LAT              = prefs.getFloat("lat", 52.5200f);
-  LNG              = prefs.getFloat("lng", 13.4050f);
+  locationName     = prefs.getString("locname", "Bodo");
+  LAT              = prefs.getFloat("lat", 67.2804f);
+  LNG              = prefs.getFloat("lng", 14.4049f);
   sleepIntervalMin = prefs.getInt("sleepMin", 10);
   unitKey          = prefs.getString("units", "metric");
-  regionFormatKey  = prefs.getString("region", "europe");
   flashModeEnabled = prefs.getBool("flashMode", false);
   wifiEnabled      = prefs.getBool("wifiEnabled", true);
 
@@ -773,7 +750,6 @@ void loadStoredSettings() {
   }
 
   if (unitKey != "metric" && unitKey != "imperial") unitKey = "metric";
-  if (regionFormatKey != "europe" && regionFormatKey != "us") regionFormatKey = "europe";
   buddyNickname.trim();
   applyThemeByKey(accent, bg);
   applyTextColorByKey(txt);
@@ -781,8 +757,6 @@ void loadStoredSettings() {
 
 void resetDataCaches() {
   tempC = NAN;
-  tempMinC = NAN;
-  tempMaxC = NAN;
   precipMm = NAN;
   windSpeedMs = NAN;
   windDirectionDeg = NAN;
@@ -929,7 +903,7 @@ bool fetchWeather() {
 
   String url = String("https://api.open-meteo.com/v1/forecast?latitude=") + String(LAT, 4) +
                "&longitude=" + String(LNG, 4) +
-               "&current=temperature_2m,wind_speed_10m,wind_direction_10m" +
+               "&current=temperature_2m,wind_speed_10m,wind_direction_10m,uv_index" +
                "&hourly=precipitation" +
                "&daily=temperature_2m_max,temperature_2m_min" +
                "&forecast_days=1&timezone=auto&wind_speed_unit=ms";
@@ -952,6 +926,7 @@ bool fetchWeather() {
   tempC = doc["current"]["temperature_2m"] | NAN;
   windSpeedMs = doc["current"]["wind_speed_10m"] | NAN;
   windDirectionDeg = doc["current"]["wind_direction_10m"] | NAN;
+  uvIndex = doc["current"]["uv_index"] | NAN;
   tempMaxC = NAN;
   tempMinC = NAN;
 
@@ -990,7 +965,7 @@ bool fetchWeather() {
 
 void ensureWeather() {
   time_t nowT = time(nullptr);
-  if ((isnan(tempC) || isnan(tempMinC) || isnan(tempMaxC) || isnan(precipMm) || isnan(windSpeedMs) || isnan(windDirectionDeg) ||
+  if ((isnan(tempC) || isnan(tempMinC) || isnan(tempMaxC) || isnan(precipMm) || isnan(windSpeedMs) || isnan(windDirectionDeg) || isnan(uvIndex) ||
        (nowT - lastWeatherFetch) > WEATHER_INTERVAL_SEC) &&
       WiFi.status() == WL_CONNECTED) {
     if (fetchWeather()) dataDirty = true;
@@ -1225,13 +1200,15 @@ void drawClockCardSprite(bool force = false) {
   struct tm tmNow;
   localtime_r(&now, &tmNow);
 
-  String timeBuf = formatClockParts(tmNow, true);
-  String dateBuf = formatDateParts(tmNow);
+  char timeBuf[16];
+  char dateBuf[32];
+  strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", &tmNow);
+  strftime(dateBuf, sizeof(dateBuf), "%a %d.%m.%Y", &tmNow);
 
   String sr = formatMinuteOfDay(sunriseMin);
   String ss = formatMinuteOfDay(sunsetMin);
 
-  String combined = timeBuf + "|" + dateBuf + "|" + sr + "|" + ss + "|" +
+  String combined = String(timeBuf) + "|" + String(dateBuf) + "|" + sr + "|" + ss + "|" +
                     String(COL_ACCENT) + "|" + String(COL_TEXT);
 
   if (!force && combined == cacheClock) return;
@@ -1242,18 +1219,7 @@ void drawClockCardSprite(bool force = false) {
   sprClock.setTextDatum(TL_DATUM);
 
   sprClock.setTextColor(COL_TEXT, COL_PANEL);
-  if (useUsRegionFormat()) {
-    int splitAt = timeBuf.lastIndexOf(' ');
-    String clockMain = splitAt > 0 ? timeBuf.substring(0, splitAt) : timeBuf;
-    String clockSuffix = splitAt > 0 ? timeBuf.substring(splitAt + 1) : "";
-    sprClock.drawString(clockMain, 10, 11, 4);
-    if (clockSuffix.length() > 0) {
-      int suffixX = 10 + sprClock.textWidth(clockMain, 4) + 4;
-      sprClock.drawString(clockSuffix, suffixX, 21, 2);
-    }
-  } else {
-    sprClock.drawString(timeBuf, 10, 11, 4);
-  }
+  sprClock.drawString(timeBuf, 10, 11, 4);
 
   sprClock.setTextColor(COL_DIM, COL_PANEL);
   sprClock.drawString(dateBuf, 10, 45, 2);
@@ -1312,9 +1278,8 @@ void drawPlaceholderSprite(int x, int y, int w, int h, const char* label, String
 
 void drawFocusTimerWidget(int x, int y, int w, int h, bool force = false) {
   String value = formatTimerClock(focusRemainingSec);
-  String status = focusStatusText();
   String hint = focusHintText();
-  String combined = value + "|" + status + "|" + hint + "|" + String(focusMenuOpen ? 1 : 0) +
+  String combined = value + "|" + hint + "|" + String(focusMenuOpen ? 1 : 0) +
                     "|" + String(COL_PANEL) + "|" + String(COL_ACCENT) + "|" + String(COL_TEXT);
 
   if (!force && combined == cacheFocusTimer) return;
@@ -1325,9 +1290,6 @@ void drawFocusTimerWidget(int x, int y, int w, int h, bool force = false) {
   sprSmall.setTextDatum(TL_DATUM);
   sprSmall.setTextColor(COL_DIM, COL_PANEL);
   sprSmall.drawString("Timer", 10, 8, 2);
-
-  sprSmall.setTextColor(COL_ACCENT, COL_PANEL);
-  sprSmall.drawRightString(status, w - 10, 8, 2);
 
   if (focusMenuOpen) {
     sprSmall.setTextColor(COL_TEXT, COL_PANEL);
@@ -1497,6 +1459,8 @@ void drawWeatherPageFull() {
 
   lastTempText = "";
   lastRainText = "";
+  lastUvText = "";
+  lastUvLevelText = "";
   lastKpText = "";
   lastKpLevelText = "";
   lastWindText = "";
@@ -1530,18 +1494,18 @@ void updateWeatherDynamic() {
     lastRainText = r;
   }
 
-  String k = kpText();
-  String kl = kpLevelText();
-  if (k != lastKpText || kl != lastKpLevelText || dataDirty) {
+  String u = uvText();
+  String ul = uvLevelText();
+  if (u != lastUvText || ul != lastUvLevelText || dataDirty) {
     tft.fillRect(18, PAGE_ROW2_Y + 30, 88, 30, COL_PANEL);
     tft.setTextColor(COL_DIM, COL_PANEL);
-    tft.drawString("KP index", 18, PAGE_ROW2_Y + 8, 2);
+    tft.drawString("UV index", 18, PAGE_ROW2_Y + 8, 2);
     tft.setTextColor(COL_TEXT, COL_PANEL);
-    tft.drawString(k, 18, PAGE_ROW2_Y + 28, 4);
+    tft.drawString(u, 18, PAGE_ROW2_Y + 28, 4);
     tft.setTextColor(COL_ACCENT, COL_PANEL);
-    tft.drawString(kl, 18, PAGE_ROW2_Y + 52, 1);
-    lastKpText = k;
-    lastKpLevelText = kl;
+    tft.drawString(ul, 18, PAGE_ROW2_Y + 52, 1);
+    lastUvText = u;
+    lastUvLevelText = ul;
   }
 
   String w = windText();
@@ -1561,20 +1525,28 @@ void updateWeatherDynamic() {
   String nl = nextSunLabel();
   String nt = nextSunTimeText();
   if (nl != lastNextSunLabel || nt != lastNextSunTime) {
-    tft.fillRect(18, PAGE_ROW3_Y + 24, 88, 22, COL_PANEL);
+    tft.fillRect(18, PAGE_ROW3_Y + 24, 88, 30, COL_PANEL);
     tft.setTextColor(COL_DIM, COL_PANEL);
-    tft.drawString(nl, 18, PAGE_ROW3_Y + 10, 2);
+    tft.drawString(nl, 18, PAGE_ROW3_Y + 8, 2);
     tft.setTextColor(COL_TEXT, COL_PANEL);
-    tft.drawString(nt, 18, PAGE_ROW3_Y + 30, 2);
+    tft.drawString(nt, 18, PAGE_ROW3_Y + 26, 4);
     lastNextSunLabel = nl;
     lastNextSunTime = nt;
   }
 
-  tft.fillRect(134, PAGE_ROW3_Y + 30, 88, 18, COL_PANEL);
-  tft.setTextColor(COL_DIM, COL_PANEL);
-  tft.drawString("Location", 134, PAGE_ROW3_Y + 10, 2);
-  tft.setTextColor(COL_TEXT, COL_PANEL);
-  tft.drawString(locationName, 134, PAGE_ROW3_Y + 30, 2);
+  String k = kpText();
+  String kl = kpLevelText();
+  if (k != lastKpText || kl != lastKpLevelText || dataDirty) {
+    tft.fillRect(134, PAGE_ROW3_Y + 30, 88, 30, COL_PANEL);
+    tft.setTextColor(COL_DIM, COL_PANEL);
+    tft.drawString("KP index", 134, PAGE_ROW3_Y + 8, 2);
+    tft.setTextColor(COL_TEXT, COL_PANEL);
+    tft.drawString(k, 134, PAGE_ROW3_Y + 28, 4);
+    tft.setTextColor(COL_ACCENT, COL_PANEL);
+    tft.drawString(kl, 134, PAGE_ROW3_Y + 52, 1);
+    lastKpText = k;
+    lastKpLevelText = kl;
+  }
 }
 
 void drawNotesPageFull() {
@@ -1827,7 +1799,6 @@ void handleRoot() {
   String bg     = prefs.getString("bg", "slate");
   String txt    = prefs.getString("text", "standard");
   String units  = prefs.getString("units", "metric");
-  String region = prefs.getString("region", "europe");
   String nickname = prefs.getString("nickname", "");
   bool flashMode = prefs.getBool("flashMode", false);
 
@@ -1837,7 +1808,7 @@ void handleRoot() {
   page += "<!doctype html><html><head>";
   page += "<meta charset='utf-8'>";
   page += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
-  page += "<title>Deskbuddy</title>";
+  page += "<title>Desk Buddy</title>";
   page += "<style>";
   page += ":root{color-scheme:dark;}";
   page += "body{margin:0;background:linear-gradient(180deg,#0b1018 0%,#111827 100%);color:#edf2f7;font-family:system-ui,sans-serif;}";
@@ -1878,7 +1849,7 @@ void handleRoot() {
   page += "@media(max-width:820px){.layout{grid-template-columns:1fr;}.grid,.grid-3,.timer-slot-grid{grid-template-columns:1fr;}.color-row{grid-template-columns:1fr;}}";
   page += "</style></head><body><div class='wrap'>";
   page += "<div class='hero'>";
-  page += "<h1>Deskbuddy</h1>";
+  page += "<h1>Desk Buddy</h1>";
   page += "<p>Adjust notes, colors, system settings, and location from your browser.</p>";
   page += "<div class='ip'>ESP IP: ";
   page += WiFi.localIP().toString();
@@ -1974,10 +1945,6 @@ void handleRoot() {
   page += "<option value='metric'"   + String(units=="metric"?" selected":"")   + ">Celsius / mm</option>";
   page += "<option value='imperial'" + String(units=="imperial"?" selected":"") + ">Fahrenheit / inches</option>";
   page += "</select></div>";
-  page += "<div><label class='label'>Regional format</label><select name='region'>";
-  page += "<option value='europe'" + String(region=="europe"?" selected":"") + ">European: 24h / dd.mm.yyyy</option>";
-  page += "<option value='us'" + String(region=="us"?" selected":"") + ">US: 12h / mm/dd/yyyy</option>";
-  page += "</select></div>";
   page += "</div>";
   page += "<div style='margin-top:14px;'><label class='label'>Timer slots</label><div class='muted'>Choose the six quick timers shown in the popup menu.</div><div class='timer-slot-grid'>";
   for (int i = 0; i < 6; i++) {
@@ -1997,10 +1964,10 @@ void handleRoot() {
   page += "<div><label class='label'>Latitude</label><input name='lat' value='" + String(LAT, 6) + "'></div>";
   page += "<div><label class='label'>Longitude</label><input name='lng' value='" + String(LNG, 6) + "'></div>";
   page += "</div>";
-  page += "<div class='footer-note'>Example Berlin: latitude 52.5200, longitude 13.4050.</div>";
+  page += "<div class='footer-note'>Example Bodo: latitude 67.2804, longitude 14.4049.</div>";
   page += "</div>";
 
-  page += "<button type='submit'>Save to Deskbuddy</button>";
+  page += "<button type='submit'>Save to Desk Buddy</button>";
   page += "</div></div></form>";
   page += "<script>";
   page += "var colorNames={accent:{standard:'Standard',ice:'Ice',white:'White',cyan:'Cyan',mint:'Mint',green:'Green',blue:'Blue',purple:'Purple',pink:'Pink',orange:'Orange',amber:'Amber',red:'Red'},text:{standard:'Standard',ice:'Ice',white:'White',cyan:'Cyan',mint:'Mint',green:'Green',blue:'Blue',purple:'Purple',pink:'Pink',orange:'Orange',amber:'Amber',red:'Red'},bg:{slate:'Slate',deep:'Deep black',nordic:'Nordic blue',forest:'Forest',coffee:'Coffee',soft:'Soft dark',midnight:'Midnight',graphite:'Graphite',garnet:'Garnet',ochre:'Ochre'}};";
@@ -2025,7 +1992,6 @@ void handleSave() {
   String newBg     = server.hasArg("bg") ? server.arg("bg") : "slate";
   String newText   = server.hasArg("text") ? server.arg("text") : "standard";
   String newUnits  = server.hasArg("units") ? server.arg("units") : "metric";
-  String newRegion = server.hasArg("region") ? server.arg("region") : "europe";
   String newLoc    = server.hasArg("locname") ? server.arg("locname") : locationName;
   String newNickname = server.hasArg("nickname") ? server.arg("nickname") : buddyNickname;
 
@@ -2041,7 +2007,6 @@ void handleSave() {
   if (newLoc.length() == 0) newLoc = "Unknown";
   if (newNickname.length() > 24) newNickname = newNickname.substring(0, 24);
   if (newUnits != "metric" && newUnits != "imperial") newUnits = "metric";
-  if (newRegion != "europe" && newRegion != "us") newRegion = "europe";
 
   int newSleepMin = server.hasArg("sleepMin") ? server.arg("sleepMin").toInt() : sleepIntervalMin;
   sleepIntervalMin = constrain(newSleepMin, 0, 120);
@@ -2058,7 +2023,6 @@ void handleSave() {
   LAT = newLat;
   LNG = newLng;
   unitKey = newUnits;
-  regionFormatKey = newRegion;
   flashModeEnabled = newFlashMode;
 
   for (int i = 0; i < 6; i++) {
@@ -2073,7 +2037,6 @@ void handleSave() {
   prefs.putString("bg", newBg);
   prefs.putString("text", newText);
   prefs.putString("units", unitKey);
-  prefs.putString("region", regionFormatKey);
   prefs.putString("nickname", buddyNickname);
   prefs.putString("locname", locationName);
   prefs.putFloat("lat", LAT);
@@ -2219,7 +2182,7 @@ void setup() {
 
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Booting Deskbuddy...", 10, 10, 2);
+  tft.drawString("Booting Desk Buddy...", 10, 10, 2);
 
   touchSPI.begin(T_SCK, T_MISO, T_MOSI);
   pinMode(TOUCH_CS, OUTPUT);
@@ -2251,7 +2214,7 @@ void setup() {
   lastClockTick = millis();
   lastDataTick = millis();
 
-  Serial.print("Deskbuddy web: http://");
+  Serial.print("Desk Buddy web: http://");
   Serial.println(WiFi.localIP());
 }
 
