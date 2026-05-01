@@ -23,8 +23,8 @@
 // =========================================================
 // WIFI
 // =========================================================
-const char* WIFI_SSID = "XXXXXX";       // Replace with your WiFi network name
-const char* WIFI_PASS = "XXXXXX";   // Replace with your WiFi password
+const char* WIFI_SSID = "YOUR_WIFI_SSID";       // Replace with your WiFi network name
+const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";   // Replace with your WiFi password
 
 // =========================================================
 // DISPLAY / TOUCH
