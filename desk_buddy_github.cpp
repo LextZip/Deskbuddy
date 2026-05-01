@@ -1,4 +1,4 @@
-// Desk Buddy V7
+// Deskbuddy V.8
 // Nav: Home / Weather / Notes / Status
 // Full version
 // - KP dots replaced with Low / Medium / High / Extreme text
@@ -23,8 +23,8 @@
 // =========================================================
 // WIFI
 // =========================================================
-const char* WIFI_SSID = "YOUR_WIFI_SSID";       // Replace with your WiFi network name
-const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";   // Replace with your WiFi password
+const char* WIFI_SSID = "XXXXXX";       // Replace with your WiFi network name
+const char* WIFI_PASS = "XXXXXX";   // Replace with your WiFi password
 
 // =========================================================
 // DISPLAY / TOUCH
@@ -68,9 +68,9 @@ TFT_eSprite sprSmall = TFT_eSprite(&tft);
 // =========================================================
 // LOCATION
 // =========================================================
-float LAT = 67.2804f;
-float LNG = 14.4049f;
-String locationName = "Bodo";
+float LAT = 52.5200f;
+float LNG = 13.4050f;
+String locationName = "Berlin";
 
 // =========================================================
 // THEME
@@ -90,6 +90,7 @@ const uint16_t COL_BLUE   = 0x041F;
 
 String textColorKey = "standard";
 String unitKey = "metric"; // metric = C/mm, imperial = F/in
+String regionFormatKey = "europe"; // europe = 24h + dd.mm.yyyy, us = 12h + mm/dd/yyyy
 
 // =========================================================
 // LAYOUT
@@ -99,8 +100,8 @@ const int SCREEN_H = 320;
 const int TOPBAR_H = 34;
 const int NAV_H    = 44;
 
-const int HOME_GRID_Y1 = 124;
-const int HOME_GRID_Y2 = 200;
+const int HOME_GRID_Y1 = 120;
+const int HOME_GRID_Y2 = 198;
 const int HOME_WIDGET_H = 70;
 
 const int HOME_TIMER_X = 124;
@@ -116,8 +117,8 @@ const int TIMER_DONE_Y = 92;
 const int TIMER_DONE_W = 188;
 const int TIMER_DONE_H = 108;
 const int PAGE_ROW1_Y = 42;
-const int PAGE_ROW2_Y = 121;
-const int PAGE_ROW3_Y = 200;
+const int PAGE_ROW2_Y = 120;
+const int PAGE_ROW3_Y = 198;
 const int PAGE_WIDGET_H = HOME_WIDGET_H;
 
 // =========================================================
@@ -279,8 +280,36 @@ static String ipText() {
   return WiFi.localIP().toString();
 }
 
+static bool useUsRegionFormat() {
+  return regionFormatKey == "us";
+}
+
+static String formatClockParts(const struct tm& tmValue, bool withSeconds) {
+  char buf[20];
+  const char* pattern = useUsRegionFormat()
+    ? (withSeconds ? "%I:%M:%S %p" : "%I:%M %p")
+    : (withSeconds ? "%H:%M:%S" : "%H:%M");
+  strftime(buf, sizeof(buf), pattern, &tmValue);
+  return String(buf);
+}
+
+static String formatDateParts(const struct tm& tmValue) {
+  char buf[32];
+  strftime(buf, sizeof(buf), useUsRegionFormat() ? "%a %m/%d/%Y" : "%a %d.%m.%Y", &tmValue);
+  return String(buf);
+}
+
 static String formatMinuteOfDay(int minOfDay) {
   if (minOfDay < 0) return "--:--";
+  if (useUsRegionFormat()) {
+    int hour24 = minOfDay / 60;
+    int minute = minOfDay % 60;
+    int hour12 = hour24 % 12;
+    if (hour12 == 0) hour12 = 12;
+    char buf[12];
+    snprintf(buf, sizeof(buf), "%d:%02d %s", hour12, minute, hour24 >= 12 ? "PM" : "AM");
+    return String(buf);
+  }
   char buf[6];
   snprintf(buf, sizeof(buf), "%02d:%02d", minOfDay / 60, minOfDay % 60);
   return String(buf);
@@ -482,9 +511,7 @@ static String lastSyncText() {
 
   struct tm tmSync;
   localtime_r(&lastSyncTime, &tmSync);
-  char buf[16];
-  strftime(buf, sizeof(buf), "Sync %H:%M", &tmSync);
-  return String(buf);
+  return "Sync " + formatClockParts(tmSync, false);
 }
 
 static String weekNumberText() {
@@ -506,7 +533,7 @@ static String timerDoneCountdownText() {
 }
 
 static String homeTitleText() {
-  return buddyNickname.length() > 0 ? buddyNickname : "Desk Buddy";
+  return buddyNickname.length() > 0 ? buddyNickname : "Deskbuddy";
 }
 
 int sanitizeTimerMinutes(int value) {
@@ -736,11 +763,12 @@ void loadStoredSettings() {
 
   notesText        = prefs.getString("notes", "No notes yet.");
   buddyNickname    = prefs.getString("nickname", "");
-  locationName     = prefs.getString("locname", "Bodo");
-  LAT              = prefs.getFloat("lat", 67.2804f);
-  LNG              = prefs.getFloat("lng", 14.4049f);
+  locationName     = prefs.getString("locname", "Berlin");
+  LAT              = prefs.getFloat("lat", 52.5200f);
+  LNG              = prefs.getFloat("lng", 13.4050f);
   sleepIntervalMin = prefs.getInt("sleepMin", 10);
   unitKey          = prefs.getString("units", "metric");
+  regionFormatKey  = prefs.getString("region", "europe");
   flashModeEnabled = prefs.getBool("flashMode", false);
   wifiEnabled      = prefs.getBool("wifiEnabled", true);
 
@@ -750,6 +778,7 @@ void loadStoredSettings() {
   }
 
   if (unitKey != "metric" && unitKey != "imperial") unitKey = "metric";
+  if (regionFormatKey != "europe" && regionFormatKey != "us") regionFormatKey = "europe";
   buddyNickname.trim();
   applyThemeByKey(accent, bg);
   applyTextColorByKey(txt);
@@ -1194,21 +1223,19 @@ int drawWrappedTextLimited(int x, int y, int maxW, const String& text, int font,
 // HOME SPRITES
 // =========================================================
 void drawClockCardSprite(bool force = false) {
-  const int x = 8, y = 42, w = 224, h = 76;
+  const int x = 8, y = PAGE_ROW1_Y, w = 224, h = HOME_WIDGET_H;
 
   time_t now = time(nullptr);
   struct tm tmNow;
   localtime_r(&now, &tmNow);
 
-  char timeBuf[16];
-  char dateBuf[32];
-  strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", &tmNow);
-  strftime(dateBuf, sizeof(dateBuf), "%a %d.%m.%Y", &tmNow);
+  String timeBuf = formatClockParts(tmNow, true);
+  String dateBuf = formatDateParts(tmNow);
 
   String sr = formatMinuteOfDay(sunriseMin);
   String ss = formatMinuteOfDay(sunsetMin);
 
-  String combined = String(timeBuf) + "|" + String(dateBuf) + "|" + sr + "|" + ss + "|" +
+  String combined = timeBuf + "|" + dateBuf + "|" + sr + "|" + ss + "|" +
                     String(COL_ACCENT) + "|" + String(COL_TEXT);
 
   if (!force && combined == cacheClock) return;
@@ -1219,7 +1246,18 @@ void drawClockCardSprite(bool force = false) {
   sprClock.setTextDatum(TL_DATUM);
 
   sprClock.setTextColor(COL_TEXT, COL_PANEL);
-  sprClock.drawString(timeBuf, 10, 11, 4);
+  if (useUsRegionFormat()) {
+    int splitAt = timeBuf.lastIndexOf(' ');
+    String clockMain = splitAt > 0 ? timeBuf.substring(0, splitAt) : timeBuf;
+    String clockSuffix = splitAt > 0 ? timeBuf.substring(splitAt + 1) : "";
+    sprClock.drawString(clockMain, 10, 11, 4);
+    if (clockSuffix.length() > 0) {
+      int suffixX = 10 + sprClock.textWidth(clockMain, 4) + 4;
+      sprClock.drawString(clockSuffix, suffixX, 18, 2);
+    }
+  } else {
+    sprClock.drawString(timeBuf, 10, 11, 4);
+  }
 
   sprClock.setTextColor(COL_DIM, COL_PANEL);
   sprClock.drawString(dateBuf, 10, 45, 2);
@@ -1529,7 +1567,18 @@ void updateWeatherDynamic() {
     tft.setTextColor(COL_DIM, COL_PANEL);
     tft.drawString(nl, 18, PAGE_ROW3_Y + 8, 2);
     tft.setTextColor(COL_TEXT, COL_PANEL);
-    tft.drawString(nt, 18, PAGE_ROW3_Y + 26, 4);
+    if (useUsRegionFormat()) {
+      int splitAt = nt.lastIndexOf(' ');
+      String sunMain = splitAt > 0 ? nt.substring(0, splitAt) : nt;
+      String sunSuffix = splitAt > 0 ? nt.substring(splitAt + 1) : "";
+      tft.drawString(sunMain, 18, PAGE_ROW3_Y + 26, 4);
+      if (sunSuffix.length() > 0) {
+        int suffixX = 18 + tft.textWidth(sunMain, 4) + 3;
+        tft.drawString(sunSuffix, suffixX, PAGE_ROW3_Y + 31, 2);
+      }
+    } else {
+      tft.drawString(nt, 18, PAGE_ROW3_Y + 26, 4);
+    }
     lastNextSunLabel = nl;
     lastNextSunTime = nt;
   }
@@ -1799,6 +1848,7 @@ void handleRoot() {
   String bg     = prefs.getString("bg", "slate");
   String txt    = prefs.getString("text", "standard");
   String units  = prefs.getString("units", "metric");
+  String region = prefs.getString("region", "europe");
   String nickname = prefs.getString("nickname", "");
   bool flashMode = prefs.getBool("flashMode", false);
 
@@ -1808,7 +1858,7 @@ void handleRoot() {
   page += "<!doctype html><html><head>";
   page += "<meta charset='utf-8'>";
   page += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
-  page += "<title>Desk Buddy</title>";
+  page += "<title>Deskbuddy</title>";
   page += "<style>";
   page += ":root{color-scheme:dark;}";
   page += "body{margin:0;background:linear-gradient(180deg,#0b1018 0%,#111827 100%);color:#edf2f7;font-family:system-ui,sans-serif;}";
@@ -1849,7 +1899,7 @@ void handleRoot() {
   page += "@media(max-width:820px){.layout{grid-template-columns:1fr;}.grid,.grid-3,.timer-slot-grid{grid-template-columns:1fr;}.color-row{grid-template-columns:1fr;}}";
   page += "</style></head><body><div class='wrap'>";
   page += "<div class='hero'>";
-  page += "<h1>Desk Buddy</h1>";
+  page += "<h1>Deskbuddy</h1>";
   page += "<p>Adjust notes, colors, system settings, and location from your browser.</p>";
   page += "<div class='ip'>ESP IP: ";
   page += WiFi.localIP().toString();
@@ -1945,6 +1995,10 @@ void handleRoot() {
   page += "<option value='metric'"   + String(units=="metric"?" selected":"")   + ">Celsius / mm</option>";
   page += "<option value='imperial'" + String(units=="imperial"?" selected":"") + ">Fahrenheit / inches</option>";
   page += "</select></div>";
+  page += "<div><label class='label'>Date format</label><select name='region'>";
+  page += "<option value='europe'" + String(region=="europe"?" selected":"") + ">European: dd.mm.yyyy</option>";
+  page += "<option value='us'" + String(region=="us"?" selected":"") + ">US: mm/dd/yyyy</option>";
+  page += "</select></div>";
   page += "</div>";
   page += "<div style='margin-top:14px;'><label class='label'>Timer slots</label><div class='muted'>Choose the six quick timers shown in the popup menu.</div><div class='timer-slot-grid'>";
   for (int i = 0; i < 6; i++) {
@@ -1964,10 +2018,10 @@ void handleRoot() {
   page += "<div><label class='label'>Latitude</label><input name='lat' value='" + String(LAT, 6) + "'></div>";
   page += "<div><label class='label'>Longitude</label><input name='lng' value='" + String(LNG, 6) + "'></div>";
   page += "</div>";
-  page += "<div class='footer-note'>Example Bodo: latitude 67.2804, longitude 14.4049.</div>";
+  page += "<div class='footer-note'>Example Berlin: latitude 52.5200, longitude 13.4050.</div>";
   page += "</div>";
 
-  page += "<button type='submit'>Save to Desk Buddy</button>";
+  page += "<button type='submit'>Save to Deskbuddy</button>";
   page += "</div></div></form>";
   page += "<script>";
   page += "var colorNames={accent:{standard:'Standard',ice:'Ice',white:'White',cyan:'Cyan',mint:'Mint',green:'Green',blue:'Blue',purple:'Purple',pink:'Pink',orange:'Orange',amber:'Amber',red:'Red'},text:{standard:'Standard',ice:'Ice',white:'White',cyan:'Cyan',mint:'Mint',green:'Green',blue:'Blue',purple:'Purple',pink:'Pink',orange:'Orange',amber:'Amber',red:'Red'},bg:{slate:'Slate',deep:'Deep black',nordic:'Nordic blue',forest:'Forest',coffee:'Coffee',soft:'Soft dark',midnight:'Midnight',graphite:'Graphite',garnet:'Garnet',ochre:'Ochre'}};";
@@ -1992,6 +2046,7 @@ void handleSave() {
   String newBg     = server.hasArg("bg") ? server.arg("bg") : "slate";
   String newText   = server.hasArg("text") ? server.arg("text") : "standard";
   String newUnits  = server.hasArg("units") ? server.arg("units") : "metric";
+  String newRegion = server.hasArg("region") ? server.arg("region") : "europe";
   String newLoc    = server.hasArg("locname") ? server.arg("locname") : locationName;
   String newNickname = server.hasArg("nickname") ? server.arg("nickname") : buddyNickname;
 
@@ -2007,6 +2062,7 @@ void handleSave() {
   if (newLoc.length() == 0) newLoc = "Unknown";
   if (newNickname.length() > 24) newNickname = newNickname.substring(0, 24);
   if (newUnits != "metric" && newUnits != "imperial") newUnits = "metric";
+  if (newRegion != "europe" && newRegion != "us") newRegion = "europe";
 
   int newSleepMin = server.hasArg("sleepMin") ? server.arg("sleepMin").toInt() : sleepIntervalMin;
   sleepIntervalMin = constrain(newSleepMin, 0, 120);
@@ -2023,6 +2079,7 @@ void handleSave() {
   LAT = newLat;
   LNG = newLng;
   unitKey = newUnits;
+  regionFormatKey = newRegion;
   flashModeEnabled = newFlashMode;
 
   for (int i = 0; i < 6; i++) {
@@ -2037,6 +2094,7 @@ void handleSave() {
   prefs.putString("bg", newBg);
   prefs.putString("text", newText);
   prefs.putString("units", unitKey);
+  prefs.putString("region", regionFormatKey);
   prefs.putString("nickname", buddyNickname);
   prefs.putString("locname", locationName);
   prefs.putFloat("lat", LAT);
@@ -2182,7 +2240,7 @@ void setup() {
 
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("Booting Desk Buddy...", 10, 10, 2);
+  tft.drawString("Booting Deskbuddy...", 10, 10, 2);
 
   touchSPI.begin(T_SCK, T_MISO, T_MOSI);
   pinMode(TOUCH_CS, OUTPUT);
@@ -2214,7 +2272,7 @@ void setup() {
   lastClockTick = millis();
   lastDataTick = millis();
 
-  Serial.print("Desk Buddy web: http://");
+  Serial.print("Deskbuddy web: http://");
   Serial.println(WiFi.localIP());
 }
 
