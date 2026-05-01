@@ -128,6 +128,27 @@ String notesText = "No notes yet.";
 bool notesDirty = true;
 String buddyNickname = "";
 
+enum HomeWidgetType {
+  HOME_WIDGET_WEEK = 0,
+  HOME_WIDGET_TIMER,
+  HOME_WIDGET_RAIN,
+  HOME_WIDGET_OUTDOOR,
+  HOME_WIDGET_KP,
+  HOME_WIDGET_UV,
+  HOME_WIDGET_WIND,
+  HOME_WIDGET_SUN
+};
+
+const int HOME_SLOT_COUNT = 4;
+HomeWidgetType homeWidgetSlots[HOME_SLOT_COUNT] = {
+  HOME_WIDGET_WEEK,
+  HOME_WIDGET_TIMER,
+  HOME_WIDGET_RAIN,
+  HOME_WIDGET_OUTDOOR
+};
+
+String cacheHomeSlots[HOME_SLOT_COUNT];
+
 // =========================================================
 // STATE
 // =========================================================
@@ -179,6 +200,95 @@ String lastNextSunLabel = "";
 String lastNextSunTime = "";
 String lastNotesText = "";
 String lastNetworkToggleText = "";
+
+const char* homeWidgetKey(HomeWidgetType type) {
+  switch (type) {
+    case HOME_WIDGET_WEEK:    return "week";
+    case HOME_WIDGET_TIMER:   return "timer";
+    case HOME_WIDGET_RAIN:    return "rain";
+    case HOME_WIDGET_OUTDOOR: return "outdoor";
+    case HOME_WIDGET_KP:      return "kp";
+    case HOME_WIDGET_UV:      return "uv";
+    case HOME_WIDGET_WIND:    return "wind";
+    case HOME_WIDGET_SUN:     return "sun";
+    default:                  return "week";
+  }
+}
+
+const char* homeWidgetLabel(HomeWidgetType type) {
+  switch (type) {
+    case HOME_WIDGET_WEEK:    return "Week";
+    case HOME_WIDGET_TIMER:   return "Timer";
+    case HOME_WIDGET_RAIN:    return "Rain";
+    case HOME_WIDGET_OUTDOOR: return "Outdoor";
+    case HOME_WIDGET_KP:      return "KP index";
+    case HOME_WIDGET_UV:      return "UV index";
+    case HOME_WIDGET_WIND:    return "Wind";
+    case HOME_WIDGET_SUN:     return "Sun event";
+    default:                  return "Week";
+  }
+}
+
+HomeWidgetType homeWidgetFromKey(const String& key) {
+  if (key == "week") return HOME_WIDGET_WEEK;
+  if (key == "timer") return HOME_WIDGET_TIMER;
+  if (key == "rain") return HOME_WIDGET_RAIN;
+  if (key == "outdoor") return HOME_WIDGET_OUTDOOR;
+  if (key == "kp") return HOME_WIDGET_KP;
+  if (key == "uv") return HOME_WIDGET_UV;
+  if (key == "wind") return HOME_WIDGET_WIND;
+  if (key == "sun") return HOME_WIDGET_SUN;
+  return HOME_WIDGET_WEEK;
+}
+
+const char* homeSlotLabel(int slot) {
+  switch (slot) {
+    case 0: return "Top left";
+    case 1: return "Top right";
+    case 2: return "Bottom left";
+    case 3: return "Bottom right";
+    default: return "Slot";
+  }
+}
+
+void getHomeSlotRect(int slot, int& x, int& y, int& w, int& h) {
+  const int xs[HOME_SLOT_COUNT] = {8, 124, 8, 124};
+  const int ys[HOME_SLOT_COUNT] = {HOME_GRID_Y1, HOME_GRID_Y1, HOME_GRID_Y2, HOME_GRID_Y2};
+  x = xs[slot];
+  y = ys[slot];
+  w = 108;
+  h = HOME_WIDGET_H;
+}
+
+void appendHomeWidgetOptions(String& page, const String& selectedKey) {
+  const HomeWidgetType types[] = {
+    HOME_WIDGET_WEEK,
+    HOME_WIDGET_TIMER,
+    HOME_WIDGET_RAIN,
+    HOME_WIDGET_OUTDOOR,
+    HOME_WIDGET_KP,
+    HOME_WIDGET_UV,
+    HOME_WIDGET_WIND,
+    HOME_WIDGET_SUN
+  };
+
+  for (HomeWidgetType type : types) {
+    const char* key = homeWidgetKey(type);
+    page += "<option value='";
+    page += key;
+    page += "'";
+    if (selectedKey == key) page += " selected";
+    page += ">";
+    page += homeWidgetLabel(type);
+    page += "</option>";
+  }
+}
+
+void clearHomeSlotCaches() {
+  for (int i = 0; i < HOME_SLOT_COUNT; i++) {
+    cacheHomeSlots[i] = "";
+  }
+}
 
 // Focus timer
 bool focusMenuOpen = false;
@@ -549,6 +659,7 @@ void resetFocusTimer() {
   focusDurationSec = 0;
   focusRemainingSec = 0;
   cacheFocusTimer = "";
+  clearHomeSlotCaches();
   cacheTimerMenu = "";
   cacheTimerDone = "";
   cacheTimerDoneCountdown = "";
@@ -564,6 +675,7 @@ void startFocusTimer(unsigned long minutes) {
   focusMenuOpen = false;
   timerDoneDialogOpen = false;
   cacheFocusTimer = "";
+  clearHomeSlotCaches();
   cacheTimerMenu = "";
   cacheTimerDone = "";
   cacheTimerDoneCountdown = "";
@@ -599,6 +711,7 @@ void updateFocusTimerState() {
     focusTimerFinished = true;
     focusMenuOpen = false;
     cacheFocusTimer = "";
+    clearHomeSlotCaches();
     cacheTimerMenu = "";
     openTimerDoneDialog();
     return;
@@ -609,6 +722,7 @@ void updateFocusTimerState() {
   if (nextRemainingSec != focusRemainingSec) {
     focusRemainingSec = nextRemainingSec;
     cacheFocusTimer = "";
+    clearHomeSlotCaches();
   }
 }
 
@@ -771,6 +885,11 @@ void loadStoredSettings() {
   regionFormatKey  = prefs.getString("region", "europe");
   flashModeEnabled = prefs.getBool("flashMode", false);
   wifiEnabled      = prefs.getBool("wifiEnabled", true);
+
+  for (int i = 0; i < HOME_SLOT_COUNT; i++) {
+    String key = String("homeSlot") + String(i);
+    homeWidgetSlots[i] = homeWidgetFromKey(prefs.getString(key.c_str(), homeWidgetKey(homeWidgetSlots[i])));
+  }
 
   for (int i = 0; i < 6; i++) {
     String key = String("timer") + String(i);
@@ -1296,6 +1415,62 @@ void drawMetricSprite(int x, int y, int w, int h, const char* label, const Strin
   pushSpriteAndDelete(sprSmall, x, y);
 }
 
+void drawWeatherStyleMetricSprite(int x, int y, int w, int h, const char* label, const String& value, String& cache, bool force = false, const String& detail = "") {
+  String combined = String(label) + "|" + value + "|" + detail + "|" + String(COL_PANEL) + "|" +
+                    String(COL_STROKE) + "|" + String(COL_TEXT);
+
+  if (!force && combined == cache) return;
+  cache = combined;
+
+  makeSpriteCard(sprSmall, w, h, true);
+
+  sprSmall.setTextDatum(TL_DATUM);
+  sprSmall.setTextColor(COL_DIM, COL_PANEL);
+  sprSmall.drawString(label, 10, 8, 2);
+
+  sprSmall.setTextColor(COL_TEXT, COL_PANEL);
+  sprSmall.drawString(value, 10, 28, 4);
+
+  if (detail.length() > 0) {
+    sprSmall.setTextColor(COL_ACCENT, COL_PANEL);
+    sprSmall.drawString(detail, 10, 52, 1);
+  }
+
+  pushSpriteAndDelete(sprSmall, x, y);
+}
+
+void drawSunEventWidget(int x, int y, int w, int h, String& cache, bool force = false) {
+  String label = nextSunLabel();
+  String value = nextSunTimeText();
+  String combined = label + "|" + value + "|" + String(COL_PANEL) + "|" +
+                    String(COL_STROKE) + "|" + String(COL_TEXT) + "|" + String(COL_ACCENT);
+
+  if (!force && combined == cache) return;
+  cache = combined;
+
+  makeSpriteCard(sprSmall, w, h, true);
+
+  sprSmall.setTextDatum(TL_DATUM);
+  sprSmall.setTextColor(COL_DIM, COL_PANEL);
+  sprSmall.drawString(label, 10, 8, 2);
+
+  sprSmall.setTextColor(COL_TEXT, COL_PANEL);
+  if (useUsRegionFormat()) {
+    int splitAt = value.lastIndexOf(' ');
+    String mainValue = splitAt > 0 ? value.substring(0, splitAt) : value;
+    String suffix = splitAt > 0 ? value.substring(splitAt + 1) : "";
+    sprSmall.drawString(mainValue, 10, 30, 4);
+    if (suffix.length() > 0) {
+      int suffixX = 10 + sprSmall.textWidth(mainValue, 4) + 3;
+      sprSmall.drawString(suffix, suffixX, 35, 2);
+    }
+  } else {
+    sprSmall.drawString(value, 10, 30, 4);
+  }
+
+  pushSpriteAndDelete(sprSmall, x, y);
+}
+
 void drawPlaceholderSprite(int x, int y, int w, int h, const char* label, String& cache, bool force = false) {
   String combined = String(label) + "|" + String(COL_PANEL) + "|" + String(COL_STROKE) + "|" + String(COL_TEXT);
 
@@ -1314,14 +1489,14 @@ void drawPlaceholderSprite(int x, int y, int w, int h, const char* label, String
   pushSpriteAndDelete(sprSmall, x, y);
 }
 
-void drawFocusTimerWidget(int x, int y, int w, int h, bool force = false) {
+void drawFocusTimerWidget(int x, int y, int w, int h, String& cache, bool force = false) {
   String value = formatTimerClock(focusRemainingSec);
   String hint = focusHintText();
   String combined = value + "|" + hint + "|" + String(focusMenuOpen ? 1 : 0) +
                     "|" + String(COL_PANEL) + "|" + String(COL_ACCENT) + "|" + String(COL_TEXT);
 
-  if (!force && combined == cacheFocusTimer) return;
-  cacheFocusTimer = combined;
+  if (!force && combined == cache) return;
+  cache = combined;
 
   makeSpriteCard(sprSmall, w, h, true);
 
@@ -1342,6 +1517,38 @@ void drawFocusTimerWidget(int x, int y, int w, int h, bool force = false) {
   }
 
   pushSpriteAndDelete(sprSmall, x, y);
+}
+
+void drawHomeSlotWidget(int slot, bool force = false) {
+  int x, y, w, h;
+  getHomeSlotRect(slot, x, y, w, h);
+
+  switch (homeWidgetSlots[slot]) {
+    case HOME_WIDGET_WEEK:
+      drawMetricSprite(x, y, w, h, "Week", weekNumberText(), cacheHomeSlots[slot], force);
+      break;
+    case HOME_WIDGET_TIMER:
+      drawFocusTimerWidget(x, y, w, h, cacheHomeSlots[slot], force);
+      break;
+    case HOME_WIDGET_RAIN:
+      drawWeatherStyleMetricSprite(x, y, w, h, "Rain", rainText(), cacheHomeSlots[slot], force);
+      break;
+    case HOME_WIDGET_OUTDOOR:
+      drawWeatherStyleMetricSprite(x, y, w, h, "Outdoor", tempText(), cacheHomeSlots[slot], force, tempRangeText());
+      break;
+    case HOME_WIDGET_KP:
+      drawWeatherStyleMetricSprite(x, y, w, h, "KP index", kpText(), cacheHomeSlots[slot], force, kpLevelText());
+      break;
+    case HOME_WIDGET_UV:
+      drawWeatherStyleMetricSprite(x, y, w, h, "UV index", uvText(), cacheHomeSlots[slot], force, uvLevelText());
+      break;
+    case HOME_WIDGET_WIND:
+      drawWeatherStyleMetricSprite(x, y, w, h, "Wind", windText(), cacheHomeSlots[slot], force, windDirectionText());
+      break;
+    case HOME_WIDGET_SUN:
+      drawSunEventWidget(x, y, w, h, cacheHomeSlots[slot], force);
+      break;
+  }
 }
 
 void drawFocusMenuOverlay(bool force = false) {
@@ -1443,21 +1650,20 @@ void drawHomePageFull() {
   drawNavBar();
 
   cacheClock = "";
-  cacheTemp = "";
-  cacheRain = "";
-  cacheWeek = "";
   cacheHomeEmpty1 = "";
   cacheHomeEmpty2 = "";
   cacheFocusTimer = "";
+  for (int i = 0; i < HOME_SLOT_COUNT; i++) {
+    cacheHomeSlots[i] = "";
+  }
 
   pageDirty = false;
   lastDrawnPage = PAGE_HOME;
 
   drawClockCardSprite(true);
-  drawMetricSprite(8, HOME_GRID_Y1, 108, HOME_WIDGET_H, "Week", weekNumberText(), cacheWeek, true);
-  drawFocusTimerWidget(HOME_TIMER_X, HOME_TIMER_Y, HOME_TIMER_W, HOME_TIMER_H, true);
-  drawMetricSprite(8, HOME_GRID_Y2, 108, HOME_WIDGET_H, "Rain", rainText(), cacheRain, true);
-  drawMetricSprite(124, HOME_GRID_Y2, 108, HOME_WIDGET_H, "Outdoor", tempText(), cacheTemp, true, tempRangeText());
+  for (int i = 0; i < HOME_SLOT_COUNT; i++) {
+    drawHomeSlotWidget(i, true);
+  }
   if (focusMenuOpen) drawFocusMenuOverlay(true);
   if (timerDoneDialogOpen) drawTimerDoneOverlay(true);
 }
@@ -1474,10 +1680,9 @@ void updateHomeDynamic() {
   }
 
   drawClockCardSprite(false);
-  drawMetricSprite(8, HOME_GRID_Y1, 108, HOME_WIDGET_H, "Week", weekNumberText(), cacheWeek, false);
-  drawFocusTimerWidget(HOME_TIMER_X, HOME_TIMER_Y, HOME_TIMER_W, HOME_TIMER_H, false);
-  drawMetricSprite(8, HOME_GRID_Y2, 108, HOME_WIDGET_H, "Rain", rainText(), cacheRain, false);
-  drawMetricSprite(124, HOME_GRID_Y2, 108, HOME_WIDGET_H, "Outdoor", tempText(), cacheTemp, false, tempRangeText());
+  for (int i = 0; i < HOME_SLOT_COUNT; i++) {
+    drawHomeSlotWidget(i, false);
+  }
 }
 
 void drawWeatherPageFull() {
@@ -1605,9 +1810,6 @@ void drawNotesPageFull() {
 
   drawCard(8, 42, 224, 226, true);
 
-  tft.setTextColor(COL_DIM, COL_PANEL);
-  tft.drawString("Synced from web page", 18, 54, 2);
-
   pageDirty = false;
   lastDrawnPage = PAGE_NOTES;
   lastNotesText = "";
@@ -1615,8 +1817,8 @@ void drawNotesPageFull() {
 
 void updateNotesDynamic() {
   if (notesText != lastNotesText || notesDirty) {
-    tft.fillRect(18, 80, 204, 170, COL_PANEL);
-    drawWrappedTextLimited(18, 80, 198, notesText, 2, COL_TEXT, COL_PANEL, 10);
+    tft.fillRect(18, 54, 204, 196, COL_PANEL);
+    drawWrappedTextLimited(18, 54, 198, notesText, 2, COL_TEXT, COL_PANEL, 12);
     lastNotesText = notesText;
     notesDirty = false;
   }
@@ -1789,16 +1991,24 @@ bool handleHomeTouch(int x, int y) {
 
   if (focusMenuOpen) return handleFocusMenuTouch(x, y);
 
-  if (x >= HOME_TIMER_X && x < HOME_TIMER_X + HOME_TIMER_W && y >= HOME_TIMER_Y && y < HOME_TIMER_Y + HOME_TIMER_H) {
-    if (focusTimerFinished) {
-      resetFocusTimer();
-    } else {
-      focusMenuOpen = true;
-      cacheFocusTimer = "";
-      cacheTimerMenu = "";
+  for (int slot = 0; slot < HOME_SLOT_COUNT; slot++) {
+    if (homeWidgetSlots[slot] != HOME_WIDGET_TIMER) continue;
+
+    int slotX, slotY, slotW, slotH;
+    getHomeSlotRect(slot, slotX, slotY, slotW, slotH);
+
+    if (x >= slotX && x < slotX + slotW && y >= slotY && y < slotY + slotH) {
+      if (focusTimerFinished) {
+        resetFocusTimer();
+      } else {
+        focusMenuOpen = true;
+        cacheFocusTimer = "";
+        clearHomeSlotCaches();
+        cacheTimerMenu = "";
+      }
+      pageDirty = true;
+      return true;
     }
-    pageDirty = true;
-    return true;
   }
 
   return false;
@@ -1851,9 +2061,13 @@ void handleRoot() {
   String region = prefs.getString("region", "europe");
   String nickname = prefs.getString("nickname", "");
   bool flashMode = prefs.getBool("flashMode", false);
+  String homeSlotKeys[HOME_SLOT_COUNT];
+  for (int i = 0; i < HOME_SLOT_COUNT; i++) {
+    homeSlotKeys[i] = prefs.getString((String("homeSlot") + String(i)).c_str(), homeWidgetKey(homeWidgetSlots[i]));
+  }
 
   String page;
-  page.reserve(18000);
+  page.reserve(21000);
 
   page += "<!doctype html><html><head>";
   page += "<meta charset='utf-8'>";
@@ -1870,6 +2084,13 @@ void handleRoot() {
   page += ".layout{display:grid;grid-template-columns:1.15fr .85fr;gap:16px;align-items:start;}";
   page += ".stack{display:grid;gap:16px;}";
   page += ".panel{background:#171b22;border:1px solid #2d3748;border-radius:18px;padding:18px;margin:0;}";
+  page += ".panel-toggle{width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;background:none;border:none;color:#edf2f7;padding:0;margin:0;cursor:pointer;text-align:left;}";
+  page += ".panel-toggle:hover{color:#ffffff;}";
+  page += ".panel-toggle h2{flex:1;}";
+  page += ".panel-chevron{font-size:18px;color:#8ea3ba;transition:transform .18s ease;}";
+  page += ".panel.collapsed .panel-chevron{transform:rotate(-90deg);}";
+  page += ".panel-body{margin-top:12px;}";
+  page += ".panel.collapsed .panel-body{display:none;}";
   page += ".panel h2{margin:0 0 6px 0;font-size:18px;}";
   page += ".panel p{margin:0 0 14px 0;color:#94a3b8;font-size:13px;line-height:1.45;}";
   page += ".grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}";
@@ -1880,6 +2101,10 @@ void handleRoot() {
   page += "button{margin-top:18px;background:#38bdf8;border:none;color:#001018;padding:13px 18px;border-radius:12px;font-weight:800;cursor:pointer;font:inherit;}";
   page += ".muted{font-size:13px;color:#94a3b8;line-height:1.45;}";
   page += ".footer-note{margin-top:10px;font-size:12px;color:#7f92a8;}";
+  page += ".settings-block{margin-top:18px;padding-top:16px;border-top:1px solid #2b3545;}";
+  page += ".settings-block:first-of-type{margin-top:0;padding-top:0;border-top:none;}";
+  page += ".settings-title{display:block;margin:0 0 6px 0;font-size:14px;font-weight:700;color:#edf2f7;letter-spacing:.02em;}";
+  page += ".settings-desc{margin:0 0 12px 0;font-size:12px;color:#8ea3ba;line-height:1.45;}";
   page += ".color-stack{display:grid;gap:12px;}";
   page += ".color-row{display:grid;grid-template-columns:120px 1fr;gap:12px;align-items:center;}";
   page += ".color-meta{display:flex;align-items:center;justify-content:space-between;gap:10px;}";
@@ -1908,18 +2133,20 @@ void handleRoot() {
   page += "<form method='POST' action='/save'>";
   page += "<div class='layout'><div class='stack'>";
 
-  page += "<div class='panel'>";
-  page += "<h2>Notes</h2>";
+  page += "<div class='panel' data-panel='notes'>";
+  page += "<button type='button' class='panel-toggle' aria-expanded='true'><h2>Notes</h2><span class='panel-chevron'>&#9662;</span></button>";
+  page += "<div class='panel-body'>";
   page += "<p>Short notes synced to the device.</p>";
   page += "<label class='label'>Notes</label>";
   page += "<textarea name='notes' maxlength='700'>";
   page += htmlEscape(notesText);
   page += "</textarea>";
   page += "<div class='muted'>Saved notes show up right away.</div>";
-  page += "</div>";
+  page += "</div></div>";
 
-  page += "<div class='panel'>";
-  page += "<h2>Theme and color</h2>";
+  page += "<div class='panel' data-panel='theme'>";
+  page += "<button type='button' class='panel-toggle' aria-expanded='true'><h2>Theme and color</h2><span class='panel-chevron'>&#9662;</span></button>";
+  page += "<div class='panel-body'>";
   page += "<p>Colors and visual style for the display.</p>";
   page += "<div class='grid'>";
 
@@ -1976,11 +2203,14 @@ void handleRoot() {
 
   page += "</div>";
 
-  page += "</div></div>";
+  page += "</div></div></div>";
 
-  page += "<div class='panel'>";
-  page += "<h2>Settings</h2>";
+  page += "<div class='panel' data-panel='settings'>";
+  page += "<button type='button' class='panel-toggle' aria-expanded='true'><h2>Settings</h2><span class='panel-chevron'>&#9662;</span></button>";
+  page += "<div class='panel-body'>";
   page += "<p>Core behavior and timer setup.</p>";
+  page += "<div class='settings-block'>";
+  page += "<span class='settings-title'>General</span>";
   page += "<div class='grid'>";
   page += "<div><label class='label'>Buddy nickname</label><input name='nickname' maxlength='24' value='" + htmlEscape(nickname) + "'></div>";
   page += "<div><label class='label'>Auto sleep interval</label><select name='sleepMin'>";
@@ -2000,31 +2230,44 @@ void handleRoot() {
   page += "<option value='us'" + String(region=="us"?" selected":"") + ">US: mm/dd/yyyy</option>";
   page += "</select></div>";
   page += "</div>";
-  page += "<div style='margin-top:14px;'><label class='label'>Timer slots</label><div class='muted'>Choose the six quick timers shown in the popup menu.</div><div class='timer-slot-grid'>";
+  page += "</div>";
+  page += "<div class='settings-block'><span class='settings-title'>Timer</span><div class='settings-desc'>Choose the six quick timers shown in the popup menu.</div><div class='timer-slot-grid'>";
   for (int i = 0; i < 6; i++) {
     page += "<div class='timer-slot'><div class='timer-slot-head'>Slot " + String(i + 1) + "</div><div class='timer-slot-input'><input type='number' min='1' max='180' name='timer" + String(i) + "' value='" + String(timerPresetMin[i]) + "'><span class='timer-unit'>min</span></div></div>";
   }
-  page += "</div></div>";
-  page += "<div style='margin-top:14px;'><label class='label'>Alert behavior</label><label style='display:flex;align-items:center;gap:10px;color:#edf2f7;'><input type='checkbox' name='flashMode' value='1'" + String(flashMode ? " checked" : "") + " style='width:auto;'>Flash screen when timer ends</label></div>";
   page += "</div>";
-
-  page += "</div><div class='stack'>";
-
-  page += "<div class='panel'>";
-  page += "<h2>Location and weather</h2>";
-  page += "<p>Used for weather data and sun times.</p>";
-  page += "<div class='grid-3'>";
+  page += "<div style='margin-top:14px;'><span class='settings-title'>Alert behavior</span><label style='display:flex;align-items:center;gap:10px;color:#edf2f7;'><input type='checkbox' name='flashMode' value='1'" + String(flashMode ? " checked" : "") + " style='width:auto;'>Flash screen when timer ends</label></div></div>";
+  page += "<div class='settings-block'><span class='settings-title'>Location</span><div class='settings-desc'>Used for weather data and sun times.</div><div class='grid-3'>";
   page += "<div><label class='label'>Location name</label><input name='locname' value='" + htmlEscape(locationName) + "'></div>";
   page += "<div><label class='label'>Latitude</label><input name='lat' value='" + String(LAT, 6) + "'></div>";
   page += "<div><label class='label'>Longitude</label><input name='lng' value='" + String(LNG, 6) + "'></div>";
+  page += "</div><div class='footer-note'>Example Berlin: latitude 52.5200, longitude 13.4050.</div></div>";
+  page += "</div></div>";
+
+  page += "<div class='panel' data-panel='widgets'>";
+  page += "<button type='button' class='panel-toggle' aria-expanded='true'><h2>Widget Customization</h2><span class='panel-chevron'>&#9662;</span></button>";
+  page += "<div class='panel-body'>";
+  page += "<p>Choose which widgets appear in the four Home slots below the clock card.</p>";
+  page += "<div class='grid'>";
+  for (int i = 0; i < HOME_SLOT_COUNT; i++) {
+    page += "<div><label class='label'>";
+    page += homeSlotLabel(i);
+    page += "</label><select name='homeSlot";
+    page += String(i);
+    page += "'>";
+    appendHomeWidgetOptions(page, homeSlotKeys[i]);
+    page += "</select></div>";
+  }
   page += "</div>";
-  page += "<div class='footer-note'>Example Berlin: latitude 52.5200, longitude 13.4050.</div>";
-  page += "</div>";
+  page += "</div></div>";
+
+  page += "</div><div class='stack'>";
 
   page += "<button type='submit'>Save to Deskbuddy</button>";
   page += "</div></div></form>";
   page += "<script>";
   page += "var colorNames={accent:{standard:'Standard',ice:'Ice',white:'White',cyan:'Cyan',mint:'Mint',green:'Green',blue:'Blue',purple:'Purple',pink:'Pink',orange:'Orange',amber:'Amber',red:'Red'},text:{standard:'Standard',ice:'Ice',white:'White',cyan:'Cyan',mint:'Mint',green:'Green',blue:'Blue',purple:'Purple',pink:'Pink',orange:'Orange',amber:'Amber',red:'Red'},bg:{slate:'Slate',deep:'Deep black',nordic:'Nordic blue',forest:'Forest',coffee:'Coffee',soft:'Soft dark',midnight:'Midnight',graphite:'Graphite',garnet:'Garnet',ochre:'Ochre'}};";
+  page += "var panelStorageKey='deskbuddy-panel-state-v1';";
   page += "document.querySelectorAll('.swatch input').forEach(function(input){";
   page += "input.addEventListener('change',function(){";
   page += "document.querySelectorAll('.swatch input[name=\"'+input.name+'\"]').forEach(function(peer){";
@@ -2032,6 +2275,24 @@ void handleRoot() {
   page += "});";
   page += "var valueEl=document.getElementById(input.name+'-value');";
   page += "if(valueEl&&colorNames[input.name]&&colorNames[input.name][input.value]){valueEl.textContent=colorNames[input.name][input.value];}";
+  page += "});";
+  page += "});";
+  page += "function readPanelState(){try{return JSON.parse(localStorage.getItem(panelStorageKey)||'{}');}catch(e){return {};}}";
+  page += "function writePanelState(state){localStorage.setItem(panelStorageKey,JSON.stringify(state));}";
+  page += "function applyPanelState(panel,collapsed){panel.classList.toggle('collapsed',collapsed);var btn=panel.querySelector('.panel-toggle');if(btn){btn.setAttribute('aria-expanded',collapsed?'false':'true');}}";
+  page += "var savedPanelState=readPanelState();";
+  page += "document.querySelectorAll('.panel[data-panel]').forEach(function(panel){";
+  page += "var panelId=panel.getAttribute('data-panel');";
+  page += "if(Object.prototype.hasOwnProperty.call(savedPanelState,panelId)){applyPanelState(panel,!!savedPanelState[panelId]);}";
+  page += "});";
+  page += "document.querySelectorAll('.panel-toggle').forEach(function(btn){";
+  page += "btn.addEventListener('click',function(){";
+  page += "var panel=btn.closest('.panel');";
+  page += "var collapsed=!panel.classList.contains('collapsed');";
+  page += "applyPanelState(panel,collapsed);";
+  page += "var state=readPanelState();";
+  page += "var panelId=panel.getAttribute('data-panel');";
+  page += "if(panelId){state[panelId]=collapsed;writePanelState(state);}";
   page += "});";
   page += "});";
   page += "</script>";
@@ -2049,6 +2310,12 @@ void handleSave() {
   String newRegion = server.hasArg("region") ? server.arg("region") : "europe";
   String newLoc    = server.hasArg("locname") ? server.arg("locname") : locationName;
   String newNickname = server.hasArg("nickname") ? server.arg("nickname") : buddyNickname;
+  HomeWidgetType newHomeSlots[HOME_SLOT_COUNT];
+  for (int i = 0; i < HOME_SLOT_COUNT; i++) {
+    String key = String("homeSlot") + String(i);
+    String currentKey = homeWidgetKey(homeWidgetSlots[i]);
+    newHomeSlots[i] = homeWidgetFromKey(server.hasArg(key) ? server.arg(key) : currentKey);
+  }
 
   float newLat = server.hasArg("lat") ? server.arg("lat").toFloat() : LAT;
   float newLng = server.hasArg("lng") ? server.arg("lng").toFloat() : LNG;
@@ -2081,6 +2348,9 @@ void handleSave() {
   unitKey = newUnits;
   regionFormatKey = newRegion;
   flashModeEnabled = newFlashMode;
+  for (int i = 0; i < HOME_SLOT_COUNT; i++) {
+    homeWidgetSlots[i] = newHomeSlots[i];
+  }
 
   for (int i = 0; i < 6; i++) {
     String key = String("timer") + String(i);
@@ -2101,6 +2371,10 @@ void handleSave() {
   prefs.putFloat("lng", LNG);
   prefs.putInt("sleepMin", sleepIntervalMin);
   prefs.putBool("flashMode", flashModeEnabled);
+  for (int i = 0; i < HOME_SLOT_COUNT; i++) {
+    String key = String("homeSlot") + String(i);
+    prefs.putString(key.c_str(), homeWidgetKey(homeWidgetSlots[i]));
+  }
   for (int i = 0; i < 6; i++) {
     String key = String("timer") + String(i);
     prefs.putInt(key.c_str(), timerPresetMin[i]);
@@ -2115,13 +2389,14 @@ void handleSave() {
   dataDirty = true;
 
   cacheClock = "";
-  cacheTemp = "";
-  cacheRain = "";
   cacheHomeEmpty1 = "";
   cacheHomeEmpty2 = "";
   cacheFocusTimer = "";
   cacheTimerMenu = "";
   cacheTimerDone = "";
+  for (int i = 0; i < HOME_SLOT_COUNT; i++) {
+    cacheHomeSlots[i] = "";
+  }
 
   lastTempText = "";
   lastRainText = "";
