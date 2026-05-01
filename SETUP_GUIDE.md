@@ -82,7 +82,7 @@ Open the Deskbuddy project in Arduino IDE.
 
 For the public version, use:
 
-- [desk_buddy_v_7_github.cpp](C:\Users\Emil Jentoft\Documents\Codex\2026-04-24\jeg-har-et-prosjekt-med-en\desk_buddy_v_7_github.cpp)
+- [desk_buddy_github.cpp]
 
 If you rename the file or convert it to an `.ino`, that is also fine as long as the project builds correctly in Arduino IDE.
 
