@@ -21,10 +21,30 @@
 #include <math.h>
 
 // =========================================================
-// WIFI
+// SECRETS / WIFI
 // =========================================================
-const char* WIFI_SSID = "YOUR_WIFI_SSID";       // Replace with your WiFi network name
-const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";   // Replace with your WiFi password
+// Copy secrets.h.example to secrets.h (gitignored) and fill in your values.
+// The fallbacks below keep the public repo compiling without one.
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+#define SECRET_WIFI_SSID "YOUR_WIFI_SSID"
+#define SECRET_WIFI_PASS "YOUR_WIFI_PASSWORD"
+#define SECRET_NIMHUB_BASE ""
+#define SECRET_NIMHUB_TOKEN ""
+#define SECRET_HERMES_BASE ""
+#define SECRET_HERMES_TOKEN ""
+#endif
+
+const char* WIFI_SSID = SECRET_WIFI_SSID;
+const char* WIFI_PASS = SECRET_WIFI_PASS;
+
+// NIM Hub time tracking + Hermes Ear recording (Controls page).
+// Either integration hides itself when its token is empty.
+const char* NIMHUB_BASE = SECRET_NIMHUB_BASE;    // e.g. https://hubapi.newideamachine.com/api/v1
+const char* NIMHUB_TOKEN = SECRET_NIMHUB_TOKEN;  // nimdt_... device token
+const char* HERMES_BASE = SECRET_HERMES_BASE;    // e.g. http://192.168.1.42:8770
+const char* HERMES_TOKEN = SECRET_HERMES_TOKEN;  // X-Control-Token value
 
 // =========================================================
 // DISPLAY / TOUCH
@@ -90,7 +110,7 @@ const uint16_t COL_BLUE   = 0x041F;
 
 String textColorKey = "standard";
 String unitKey = "metric"; // metric = C/mm, imperial = F/in
-String regionFormatKey = "europe"; // europe = 24h + dd.mm.yyyy, us = 12h + mm/dd/yyyy
+String regionFormatKey = "europe"; // europe = 24h + dd.mm.yyyy, us = 12h + mm/dd/yyyy, iso = 24h + yyyy-mm-dd
 String timezoneKey = "europe_central";
 
 // =========================================================
@@ -157,8 +177,29 @@ enum Page {
   PAGE_HOME = 0,
   PAGE_WEATHER = 1,
   PAGE_NOTES = 2,
-  PAGE_STATUS = 3
+  PAGE_STATUS = 3,
+  PAGE_CONTROLS = 4
 };
+
+// Pages shown in the nav bar, in order. Weather and Notes are parked for
+// now — to bring one back, uncomment its entry in BOTH arrays and re-enable
+// its cases in drawCurrentPageFull/updateCurrentPageDynamic below. (Weather
+// DATA still updates regardless — the Home widgets use it.)
+const Page NAV_PAGES[] = {
+  PAGE_HOME,
+  // PAGE_WEATHER,
+  // PAGE_NOTES,
+  PAGE_STATUS,
+  PAGE_CONTROLS
+};
+const char* NAV_NAMES[] = {
+  "Home",
+  // "Weather",
+  // "Notes",
+  "Status",
+  "Ctrl"
+};
+const int NAV_COUNT = sizeof(NAV_PAGES) / sizeof(NAV_PAGES[0]);
 
 Page currentPage = PAGE_HOME;
 Page lastDrawnPage = (Page)-1;
@@ -184,6 +225,10 @@ String cacheTimerMenu = "";
 String cacheTimerDone = "";
 String cacheTimerDoneCountdown = "";
 String cacheTimerDoneFlash = "";
+
+String lastNimCardText = "";
+String lastNimButtonsText = "";
+String lastHermesCardText = "";
 
 String lastWifiText = "";
 String lastSignalText = "";
@@ -524,7 +569,10 @@ static String formatClockParts(const struct tm& tmValue, bool withSeconds) {
 
 static String formatDateParts(const struct tm& tmValue) {
   char buf[32];
-  strftime(buf, sizeof(buf), useUsRegionFormat() ? "%a %m/%d/%Y" : "%a %d.%m.%Y", &tmValue);
+  const char* pattern = "%a %d.%m.%Y";
+  if (useUsRegionFormat()) pattern = "%a %m/%d/%Y";
+  else if (regionFormatKey == "iso") pattern = "%a %Y-%m-%d";
+  strftime(buf, sizeof(buf), pattern, &tmValue);
   return String(buf);
 }
 
@@ -1017,7 +1065,7 @@ void loadStoredSettings() {
   }
 
   if (unitKey != "metric" && unitKey != "imperial") unitKey = "metric";
-  if (regionFormatKey != "europe" && regionFormatKey != "us") regionFormatKey = "europe";
+  if (regionFormatKey != "europe" && regionFormatKey != "us" && regionFormatKey != "iso") regionFormatKey = "europe";
   buddyNickname.trim();
   applyThemeByKey(accent, bg);
   applyTextColorByKey(txt);
@@ -1289,6 +1337,290 @@ void ensureKpIndex() {
 }
 
 // =========================================================
+// CONTROLS PAGE — NIM Hub timer + Hermes Ear recording
+// =========================================================
+bool nimEnabled() { return NIMHUB_TOKEN[0] != '\0' && NIMHUB_BASE[0] != '\0'; }
+bool hermesEnabled() { return HERMES_TOKEN[0] != '\0' && HERMES_BASE[0] != '\0'; }
+
+// NIM Hub timer state, mirrored from GET /active-timer/my
+bool nimStateKnown = false;   // false until a poll succeeds (or fails: nimError)
+bool nimError = false;
+bool nimTimerPresent = false;
+bool nimTimerPaused = false;
+long nimTimerId = 0;
+long nimTaskId = 0;
+long nimContractorUserId = 0;
+long nimAccumSec = 0;
+time_t nimStartEpoch = 0;
+String nimTimerDesc = "";
+String nimActionMsg = "";      // outcome of the last button press
+unsigned long lastNimPollMs = 0;
+
+// Hermes Ear state, mirrored from GET /status
+bool hermesStateKnown = false;
+bool hermesError = false;
+bool hermesRecording = false;
+long hermesRecSec = 0;
+unsigned long lastHermesPollMs = 0;
+
+const unsigned long NIM_POLL_MS = 10000;
+const unsigned long HERMES_POLL_MS = 5000;
+
+// All controls HTTP runs on a worker task (core 0) so the UI thread never
+// blocks on the network — button presses enqueue a command and return.
+enum CtrlCmd : uint8_t {
+  CMD_NIM_POLL,
+  CMD_NIM_PAUSE_RESUME,
+  CMD_NIM_STOP_SAVE,
+  CMD_HERMES_POLL,
+  CMD_HERMES_TOGGLE
+};
+QueueHandle_t ctrlQueue = nullptr;
+SemaphoreHandle_t ctrlMutex = nullptr;
+volatile bool ctrlBusy = false;        // worker is mid-request
+volatile bool ctrlStateDirty = false;  // worker finished; UI should redraw
+
+// Only Strings need the mutex (heap realloc during a cross-core read can
+// crash); 32-bit primitives are atomic on Xtensa.
+void ctrlLock() { if (ctrlMutex) xSemaphoreTake(ctrlMutex, portMAX_DELAY); }
+void ctrlUnlock() { if (ctrlMutex) xSemaphoreGive(ctrlMutex); }
+
+// (takes uint8_t rather than CtrlCmd so the Arduino IDE's auto-generated
+// prototype, which lands above the enum definition, still compiles)
+void enqueueCtrl(uint8_t cmd) {
+  if (!ctrlQueue) return;
+  xQueueSend(ctrlQueue, &cmd, 0);
+}
+
+bool ctrlIdle() {
+  return !ctrlBusy && ctrlQueue && uxQueueMessagesWaiting(ctrlQueue) == 0;
+}
+
+// Parse "2026-08-19T14:03:11.000Z" (UTC) to epoch. Same approach as the
+// sunrise parser: fields via sscanf, then days-since-epoch arithmetic so the
+// device timezone can't skew it.
+time_t parseIsoUtcEpoch(const char* iso) {
+  int Y, M, D, h, m, s;
+  if (!iso || sscanf(iso, "%d-%d-%dT%d:%d:%d", &Y, &M, &D, &h, &m, &s) != 6) return (time_t)-1;
+  auto daysFromCivil = [](int y, int mo, int d) -> long {
+    y -= mo <= 2;
+    long era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = (unsigned)(y - era * 400);
+    unsigned doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + (long)doe - 719468;
+  };
+  return (time_t)daysFromCivil(Y, M, D) * 86400 + h * 3600 + m * 60 + s;
+}
+
+long nimElapsedSeconds() {
+  if (!nimTimerPresent) return 0;
+  if (nimTimerPaused) return nimAccumSec;
+  time_t nowT = time(nullptr);
+  long running = (nimStartEpoch > 0 && nowT > nimStartEpoch) ? (long)(nowT - nimStartEpoch) : 0;
+  return nimAccumSec + running;
+}
+
+// One HTTPS round trip to NIM Hub. Returns the HTTP status code (or -1),
+// filling respDoc when the response parses as JSON.
+int nimRequest(const char* method, const String& path, const String& body, JsonDocument& respDoc) {
+  if (WiFi.status() != WL_CONNECTED) return -1;
+  // Persistent client (worker task only): with setReuse the TLS session and
+  // TCP connection survive between calls, cutting each request from a full
+  // ~1-2s handshake to a single round trip while the server keeps it alive.
+  static WiFiClientSecure client;
+  static bool clientInit = false;
+  if (!clientInit) {
+    client.setInsecure();
+    clientInit = true;
+  }
+  HTTPClient http;
+  http.setReuse(true);
+  http.setTimeout(15000);
+  if (!http.begin(client, String(NIMHUB_BASE) + path)) return -1;
+  http.addHeader("Authorization", String("Bearer ") + NIMHUB_TOKEN);
+  if (body.length()) http.addHeader("Content-Type", "application/json");
+  int code = http.sendRequest(method, body);
+  String resp = http.getString();
+  http.end();
+  if (resp.length()) deserializeJson(respDoc, resp);
+  return code;
+}
+
+// Apply a timer object from any endpoint's response (poll, pause, resume).
+void applyNimTimerData(JsonVariant data) {
+  if (data.isNull()) {
+    nimTimerPresent = false;
+    return;
+  }
+  nimTimerPresent = true;
+  nimTimerId = data["ActiveTimerID"] | 0L;
+  nimTaskId = data["TaskID"] | 0L;
+  nimContractorUserId = data["ContractorUserID"] | 0L;
+  nimTimerPaused = data["IsPaused"] | false;
+  nimAccumSec = data["AccumulatedSeconds"] | 0L;
+  nimStartEpoch = parseIsoUtcEpoch(data["StartTime"] | (const char*)nullptr);
+  ctrlLock();
+  nimTimerDesc = String((const char*)(data["Description"] | ""));
+  ctrlUnlock();
+}
+
+bool pollNimTimer() {
+  StaticJsonDocument<1536> doc;
+  int code = nimRequest("GET", "/active-timer/my", "", doc);
+  nimStateKnown = true;
+  if (code != 200) {
+    nimError = true;
+    return false;
+  }
+  nimError = false;
+  applyNimTimerData(doc["data"]);
+  return true;
+}
+
+void setNimActionMsg(const String& msg) {
+  ctrlLock();
+  nimActionMsg = msg;
+  ctrlUnlock();
+}
+
+void nimPauseResume() {
+  if (!nimTimerPresent) return;
+  StaticJsonDocument<1536> doc;
+  int code;
+  if (nimTimerPaused) {
+    code = nimRequest("POST", "/active-timer/" + String(nimTimerId) + "/resume", "", doc);
+    setNimActionMsg((code == 200) ? "Resumed" : "Resume failed");
+  } else {
+    String body = String("{\"ElapsedSeconds\":") + nimElapsedSeconds() + "}";
+    code = nimRequest("POST", "/active-timer/" + String(nimTimerId) + "/pause", body, doc);
+    setNimActionMsg((code == 200) ? "Paused" : "Pause failed");
+  }
+  if (code == 200) {
+    // The action response carries the updated timer — no second round trip.
+    applyNimTimerData(doc["data"]);
+  } else {
+    // A 403/500 usually means the timer changed under us (the web UI may
+    // have stopped it) — re-sync from the server.
+    pollNimTimer();
+  }
+}
+
+void nimStopAndSave() {
+  if (!nimTimerPresent) return;
+  long elapsed = nimElapsedSeconds();
+  // hoursWorked: 2 decimals, API floor is 0.01
+  float hours = elapsed / 3600.0f;
+  if (hours < 0.01f) hours = 0.01f;
+  char hoursBuf[16];
+  snprintf(hoursBuf, sizeof(hoursBuf), "%.2f", hours);
+
+  struct tm lt;
+  time_t nowT = time(nullptr);
+  localtime_r(&nowT, &lt);
+  char dateBuf[12];
+  strftime(dateBuf, sizeof(dateBuf), "%Y-%m-%d", &lt);
+
+  String desc = nimTimerDesc.length() ? nimTimerDesc : String("Logged from Deskbuddy");
+  desc.replace("\\", "\\\\");
+  desc.replace("\"", "\\\"");
+
+  // Two calls, same order as the web UI: save the entry FIRST, then clear
+  // the timer. Never re-send the save on a delete failure (double-logging
+  // is worse than a leftover timer, which the next poll will surface).
+  StaticJsonDocument<1536> doc;
+  String body = String("{\"contractorUserId\":") + nimContractorUserId +
+                ",\"taskId\":" + nimTaskId +
+                ",\"dateWorked\":\"" + dateBuf + "\"" +
+                ",\"hoursWorked\":" + hoursBuf +
+                ",\"description\":\"" + desc + "\"}";
+  int code = nimRequest("POST", "/time-entries", body, doc);
+  if (code != 200 && code != 201) {
+    setNimActionMsg("Save failed (" + String(code) + ")");
+    pollNimTimer();
+    return;
+  }
+
+  StaticJsonDocument<1536> delDoc;
+  int delCode = nimRequest("DELETE", "/active-timer/" + String(nimTimerId), "", delDoc);
+  if (delCode == 200) {
+    nimTimerPresent = false;
+    setNimActionMsg("Saved " + String(hoursBuf) + "h");
+  } else {
+    setNimActionMsg("Saved; timer stuck");
+    pollNimTimer();
+  }
+}
+
+// One HTTP round trip to the Hermes Ear Jetson (plain LAN HTTP).
+int hermesRequest(const char* method, const char* path, JsonDocument& respDoc) {
+  if (WiFi.status() != WL_CONNECTED) return -1;
+  WiFiClient client;
+  HTTPClient http;
+  http.setTimeout(6000);
+  if (!http.begin(client, String(HERMES_BASE) + path)) return -1;
+  http.addHeader("X-Control-Token", HERMES_TOKEN);
+  int code = http.sendRequest(method, "");
+  String resp = http.getString();
+  http.end();
+  if (resp.length()) deserializeJson(respDoc, resp);
+  return code;
+}
+
+bool pollHermes() {
+  StaticJsonDocument<256> doc;
+  int code = hermesRequest("GET", "/status", doc);
+  hermesStateKnown = true;
+  if (code != 200) {
+    hermesError = true;
+    return false;
+  }
+  hermesError = false;
+  hermesRecording = String((const char*)(doc["state"] | "")) == "recording";
+  hermesRecSec = doc["recording_seconds"] | 0L;
+  return true;
+}
+
+void hermesToggle() {
+  StaticJsonDocument<256> doc;
+  int code = hermesRequest("POST", "/toggle", doc);
+  if (code == 200) {
+    hermesError = false;
+    hermesStateKnown = true;
+    hermesRecording = String((const char*)(doc["state"] | "")) == "recording";
+    hermesRecSec = doc["recording_seconds"] | 0L;
+  } else {
+    hermesError = true;
+  }
+}
+
+String formatHms(long totalSec) {
+  if (totalSec < 0) totalSec = 0;
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%ld:%02ld:%02ld", totalSec / 3600, (totalSec / 60) % 60, totalSec % 60);
+  return String(buf);
+}
+
+// Worker task (core 0): drains the command queue, doing all the blocking
+// network work off the UI thread. The UI enqueues and keeps drawing.
+void controlsWorkerTask(void*) {
+  uint8_t cmd;
+  for (;;) {
+    if (xQueueReceive(ctrlQueue, &cmd, portMAX_DELAY) != pdTRUE) continue;
+    ctrlBusy = true;
+    switch ((CtrlCmd)cmd) {
+      case CMD_NIM_POLL:         pollNimTimer(); break;
+      case CMD_NIM_PAUSE_RESUME: nimPauseResume(); break;
+      case CMD_NIM_STOP_SAVE:    nimStopAndSave(); break;
+      case CMD_HERMES_POLL:      pollHermes(); break;
+      case CMD_HERMES_TOGGLE:    hermesToggle(); break;
+    }
+    ctrlBusy = false;
+    ctrlStateDirty = true;
+  }
+}
+
+// =========================================================
 // DRAW HELPERS
 // =========================================================
 void drawCard(int x, int y, int w, int h, bool accent = false) {
@@ -1327,12 +1659,11 @@ void drawNavBar() {
   tft.fillRect(0, y, SCREEN_W, NAV_H, COL_PANEL_ALT);
   tft.drawFastHLine(0, y, SCREEN_W, COL_STROKE);
 
-  const int btnW = SCREEN_W / 4;
-  const char* names[4] = {"Home", "Weather", "Notes", "Status"};
+  const int btnW = SCREEN_W / NAV_COUNT;
 
-  for (int i = 0; i < 4; i++) {
+  for (int i = 0; i < NAV_COUNT; i++) {
     int bx = i * btnW;
-    bool active = ((int)currentPage == i);
+    bool active = (currentPage == NAV_PAGES[i]);
 
     uint16_t bg = active ? COL_ACCENT : COL_PANEL;
     uint16_t fg = active ? TFT_BLACK : COL_TEXT;
@@ -1342,7 +1673,7 @@ void drawNavBar() {
 
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(fg, bg);
-    tft.drawString(names[i], bx + btnW / 2, y + NAV_H / 2, 1);
+    tft.drawString(NAV_NAMES[i], bx + btnW / 2, y + NAV_H / 2, 1);
   }
 
   tft.setTextDatum(TL_DATUM);
@@ -2027,12 +2358,141 @@ void updateStatusDynamic() {
   }
 }
 
+void drawControlsPageFull() {
+  tft.fillScreen(COL_BG);
+  drawTopBar("Controls");
+  drawNavBar();
+
+  // NIM Hub: status card + two buttons
+  drawCard(8, PAGE_ROW1_Y, 224, PAGE_WIDGET_H, true);
+  drawCard(8, PAGE_ROW2_Y, 108, PAGE_WIDGET_H, true);
+  drawCard(124, PAGE_ROW2_Y, 108, PAGE_WIDGET_H, true);
+  // Hermes Ear: status + toggle in one wide card
+  drawCard(8, PAGE_ROW3_Y, 224, PAGE_WIDGET_H, true);
+
+  pageDirty = false;
+  lastDrawnPage = PAGE_CONTROLS;
+
+  lastNimCardText = "";
+  lastNimButtonsText = "";
+  lastHermesCardText = "";
+}
+
+void updateControlsDynamic() {
+  // Strings are shared with the worker task — copy them under the lock.
+  ctrlLock();
+  String descCopy = nimTimerDesc;
+  String msgCopy = nimActionMsg;
+  ctrlUnlock();
+
+  // --- NIM Hub status card ---
+  String nimLine1, nimLine2;
+  if (!nimEnabled()) {
+    nimLine1 = "Not configured";
+    nimLine2 = "see secrets.h";
+  } else if (!nimStateKnown) {
+    nimLine1 = "Checking...";
+  } else if (nimError) {
+    nimLine1 = "Unreachable";
+    nimLine2 = msgCopy;
+  } else if (!nimTimerPresent) {
+    nimLine1 = "No timer running";
+    nimLine2 = msgCopy;
+  } else {
+    nimLine1 = formatHms(nimElapsedSeconds()) + (nimTimerPaused ? "  paused" : "");
+    if (msgCopy == "Working...") nimLine1 = "Working...";
+    nimLine2 = descCopy.length() ? descCopy : ("Task #" + String(nimTaskId));
+  }
+  String nimCard = nimLine1 + "|" + nimLine2;
+  if (nimCard != lastNimCardText) {
+    tft.fillRect(14, PAGE_ROW1_Y + 6, 212, PAGE_WIDGET_H - 12, COL_PANEL);
+    tft.setTextColor(COL_DIM, COL_PANEL);
+    tft.drawString("NIM Hub timer", 18, PAGE_ROW1_Y + 8, 2);
+    tft.setTextColor(nimTimerPaused ? COL_DIM : COL_TEXT, COL_PANEL);
+    tft.drawString(nimLine1, 18, PAGE_ROW1_Y + 28, 4);
+    tft.setTextColor(COL_DIM, COL_PANEL);
+    String l2 = nimLine2;
+    if (l2.length() > 30) l2 = l2.substring(0, 29) + "~";
+    tft.drawString(l2, 18, PAGE_ROW1_Y + 54, 1);
+    lastNimCardText = nimCard;
+  }
+
+  // --- NIM Hub buttons ---
+  bool buttonsActive = nimEnabled() && nimStateKnown && !nimError && nimTimerPresent;
+  String pauseLabel = nimTimerPaused ? "Resume" : "Pause";
+  String btnState = pauseLabel + "|" + (buttonsActive ? "on" : "off");
+  if (btnState != lastNimButtonsText) {
+    uint16_t bg = buttonsActive ? COL_ACCENT : COL_PANEL_ALT;
+    uint16_t fg = buttonsActive ? TFT_BLACK : COL_DIM;
+
+    tft.fillRect(14, PAGE_ROW2_Y + 6, 96, PAGE_WIDGET_H - 12, COL_PANEL);
+    tft.fillRoundRect(16, PAGE_ROW2_Y + 16, 92, 38, 8, bg);
+    tft.drawRoundRect(16, PAGE_ROW2_Y + 16, 92, 38, 8, buttonsActive ? COL_ACCENT : COL_STROKE);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(fg, bg);
+    tft.drawString(pauseLabel, 62, PAGE_ROW2_Y + 35, 2);
+
+    tft.fillRect(130, PAGE_ROW2_Y + 6, 96, PAGE_WIDGET_H - 12, COL_PANEL);
+    tft.fillRoundRect(132, PAGE_ROW2_Y + 16, 92, 38, 8, bg);
+    tft.drawRoundRect(132, PAGE_ROW2_Y + 16, 92, 38, 8, buttonsActive ? COL_ACCENT : COL_STROKE);
+    tft.setTextColor(fg, bg);
+    tft.drawString("Stop & Save", 178, PAGE_ROW2_Y + 35, 2);
+
+    tft.setTextDatum(TL_DATUM);
+    lastNimButtonsText = btnState;
+  }
+
+  // --- Hermes Ear card ---
+  String hermesLine, hermesBtn;
+  bool hermesBtnActive = false;
+  if (!hermesEnabled()) {
+    hermesLine = "Not configured";
+    hermesBtn = "-";
+  } else if (!hermesStateKnown) {
+    hermesLine = "Checking...";
+    hermesBtn = "-";
+  } else if (hermesError) {
+    hermesLine = "Unreachable";
+    hermesBtn = "-";
+  } else if (hermesRecording) {
+    hermesLine = "Recording " + formatHms(hermesRecSec);
+    hermesBtn = "Stop";
+    hermesBtnActive = true;
+  } else {
+    hermesLine = "Idle";
+    hermesBtn = "Start";
+    hermesBtnActive = true;
+  }
+  String hermesCard = hermesLine + "|" + hermesBtn;
+  if (hermesCard != lastHermesCardText) {
+    tft.fillRect(14, PAGE_ROW3_Y + 6, 212, PAGE_WIDGET_H - 12, COL_PANEL);
+    tft.setTextColor(COL_DIM, COL_PANEL);
+    tft.drawString("Hermes Ear", 18, PAGE_ROW3_Y + 8, 2);
+    tft.setTextColor(hermesRecording ? COL_ACCENT : COL_TEXT, COL_PANEL);
+    tft.drawString(hermesLine, 18, PAGE_ROW3_Y + 34, 2);
+
+    uint16_t bg = hermesBtnActive ? COL_ACCENT : COL_PANEL_ALT;
+    uint16_t fg = hermesBtnActive ? TFT_BLACK : COL_DIM;
+    tft.fillRoundRect(156, PAGE_ROW3_Y + 20, 66, 30, 8, bg);
+    tft.drawRoundRect(156, PAGE_ROW3_Y + 20, 66, 30, 8, hermesBtnActive ? COL_ACCENT : COL_STROKE);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(fg, bg);
+    tft.drawString(hermesBtn, 189, PAGE_ROW3_Y + 35, 2);
+    tft.setTextDatum(TL_DATUM);
+    lastHermesCardText = hermesCard;
+  }
+}
+
 void drawCurrentPageFull() {
   switch (currentPage) {
     case PAGE_HOME:    drawHomePageFull(); break;
-    case PAGE_WEATHER: drawWeatherPageFull(); break;
-    case PAGE_NOTES:   drawNotesPageFull(); break;
+    // Weather and Notes pages parked — uncomment (and their NAV_PAGES
+    // entries) to restore:
+    // case PAGE_WEATHER: drawWeatherPageFull(); break;
+    // case PAGE_NOTES:   drawNotesPageFull(); break;
     case PAGE_STATUS:  drawStatusPageFull(); break;
+    case PAGE_CONTROLS: drawControlsPageFull(); break;
+    default: drawHomePageFull(); break;
   }
 
   if (focusMenuOpen && currentPage == PAGE_HOME) drawFocusMenuOverlay(true);
@@ -2052,9 +2512,13 @@ void updateCurrentPageDynamic() {
 
   switch (currentPage) {
     case PAGE_HOME:    updateHomeDynamic(); break;
-    case PAGE_WEATHER: updateWeatherDynamic(); break;
-    case PAGE_NOTES:   updateNotesDynamic(); break;
+    // Weather and Notes pages parked — uncomment (and their NAV_PAGES
+    // entries) to restore:
+    // case PAGE_WEATHER: updateWeatherDynamic(); break;
+    // case PAGE_NOTES:   updateNotesDynamic(); break;
     case PAGE_STATUS:  updateStatusDynamic(); break;
+    case PAGE_CONTROLS: updateControlsDynamic(); break;
+    default: break;
   }
 }
 
@@ -2154,20 +2618,62 @@ bool handleStatusTouch(int x, int y) {
   return false;
 }
 
+bool handleControlsTouch(int x, int y) {
+  if (currentPage != PAGE_CONTROLS) return false;
+
+  // NIM Hub buttons (row 2): Pause/Resume left, Stop & Save right.
+  // Presses enqueue a command for the worker task and return immediately;
+  // presses while a request is in flight are consumed and ignored.
+  bool nimActive = nimEnabled() && nimStateKnown && !nimError && nimTimerPresent;
+  if (nimActive && y >= PAGE_ROW2_Y + 16 && y < PAGE_ROW2_Y + 54) {
+    if (x >= 16 && x < 108) {
+      if (!ctrlIdle()) return true;
+      setNimActionMsg("Working...");
+      lastNimCardText = "";
+      updateControlsDynamic();
+      enqueueCtrl(CMD_NIM_PAUSE_RESUME);
+      return true;
+    }
+    if (x >= 132 && x < 224) {
+      if (!ctrlIdle()) return true;
+      setNimActionMsg("Working...");
+      lastNimCardText = "";
+      updateControlsDynamic();
+      enqueueCtrl(CMD_NIM_STOP_SAVE);
+      return true;
+    }
+  }
+
+  // Hermes toggle button (row 3)
+  bool hermesActive = hermesEnabled() && hermesStateKnown && !hermesError;
+  if (hermesActive && x >= 156 && x < 222 && y >= PAGE_ROW3_Y + 20 && y < PAGE_ROW3_Y + 50) {
+    if (!ctrlIdle()) return true;
+    enqueueCtrl(CMD_HERMES_TOGGLE);
+    return true;
+  }
+
+  return false;
+}
+
 // =========================================================
 // NAVIGATION
 // =========================================================
 void handleNavTouch(int x, int y) {
   if (y < SCREEN_H - NAV_H) return;
 
-  int btnW = SCREEN_W / 4;
+  int btnW = SCREEN_W / NAV_COUNT;
   int idx = x / btnW;
-  if (idx < 0 || idx > 3) return;
+  if (idx < 0 || idx >= NAV_COUNT) return;
 
-  Page newPage = (Page)idx;
+  Page newPage = NAV_PAGES[idx];
   if (newPage != currentPage) {
     currentPage = newPage;
     pageDirty = true;
+    if (newPage == PAGE_CONTROLS) {
+      // Poll immediately on entry so the page opens with fresh state
+      lastNimPollMs = 0;
+      lastHermesPollMs = 0;
+    }
   }
 }
 
@@ -2350,6 +2856,7 @@ void handleRoot() {
   page += "<div><label class='label'>Date format</label><select name='region'>";
   page += "<option value='europe'" + String(region=="europe"?" selected":"") + ">European: dd.mm.yyyy</option>";
   page += "<option value='us'" + String(region=="us"?" selected":"") + ">US: mm/dd/yyyy</option>";
+  page += "<option value='iso'" + String(region=="iso"?" selected":"") + ">ISO: yyyy-mm-dd</option>";
   page += "</select></div>";
   page += "<div><label class='label'>Time zone</label><select name='tz'>";
   appendTimezoneOptions(page, tz);
@@ -2455,7 +2962,7 @@ void handleSave() {
   if (newLoc.length() == 0) newLoc = "Unknown";
   if (newNickname.length() > 24) newNickname = newNickname.substring(0, 24);
   if (newUnits != "metric" && newUnits != "imperial") newUnits = "metric";
-  if (newRegion != "europe" && newRegion != "us") newRegion = "europe";
+  if (newRegion != "europe" && newRegion != "us" && newRegion != "iso") newRegion = "europe";
   newTz = sanitizeTimezoneKey(newTz);
 
   int newSleepMin = server.hasArg("sleepMin") ? server.arg("sleepMin").toInt() : sleepIntervalMin;
@@ -2667,6 +3174,12 @@ void setup() {
 
   setupWebServer();
 
+  // Controls worker: all NIM Hub / Hermes HTTP happens on core 0 so the UI
+  // (core 1) never freezes on the network. 12KB stack for TLS + JSON.
+  ctrlMutex = xSemaphoreCreateMutex();
+  ctrlQueue = xQueueCreate(8, sizeof(uint8_t));
+  xTaskCreatePinnedToCore(controlsWorkerTask, "ctrlWorker", 12288, nullptr, 1, nullptr, 0);
+
   pageDirty = true;
   dataDirty = true;
   notesDirty = true;
@@ -2716,12 +3229,12 @@ void loop() {
         if (!manualDimMode) {
           wakeDisplay();
         } else {
-          if (!handleHomeTouch(tx, ty) && !handleStatusTouch(tx, ty)) {
+          if (!handleHomeTouch(tx, ty) && !handleStatusTouch(tx, ty) && !handleControlsTouch(tx, ty)) {
             handleNavTouch(tx, ty);
           }
         }
       } else {
-        if (!handleHomeTouch(tx, ty) && !handleStatusTouch(tx, ty)) {
+        if (!handleHomeTouch(tx, ty) && !handleStatusTouch(tx, ty) && !handleControlsTouch(tx, ty)) {
           handleNavTouch(tx, ty);
         }
       }
@@ -2733,6 +3246,29 @@ void loop() {
     ensureSunTimesForToday();
     ensureWeather();
     ensureKpIndex();
+  }
+
+  // Controls page polling — only while the page is visible and awake.
+  // Polls are enqueued for the worker task, never run on the UI thread.
+  if (currentPage == PAGE_CONTROLS && !sleepOff && WiFi.status() == WL_CONNECTED && ctrlIdle()) {
+    if (nimEnabled() && millis() - lastNimPollMs >= NIM_POLL_MS) {
+      lastNimPollMs = millis();
+      enqueueCtrl(CMD_NIM_POLL);
+    } else if (hermesEnabled() && millis() - lastHermesPollMs >= HERMES_POLL_MS) {
+      lastHermesPollMs = millis();
+      enqueueCtrl(CMD_HERMES_POLL);
+    }
+  }
+
+  // Worker finished a command — refresh the Controls page with the result
+  if (ctrlStateDirty) {
+    ctrlStateDirty = false;
+    if (currentPage == PAGE_CONTROLS && !sleepOff && !pageDirty) {
+      lastNimCardText = "";
+      lastNimButtonsText = "";
+      lastHermesCardText = "";
+      updateControlsDynamic();
+    }
   }
 
   if (pageDirty || lastDrawnPage != currentPage) {

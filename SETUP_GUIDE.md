@@ -88,14 +88,22 @@ If you rename the file or convert it to an `.ino`, that is also fine as long as 
 
 ## 5. Add Your WiFi Credentials
 
-Before uploading, update the WiFi values in the code:
+Copy `secrets.h.example` to `secrets.h` next to the sketch and fill in your
+values:
 
 ```cpp
-const char* WIFI_SSID = "YOUR_WIFI_SSID";
-const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";
+#define SECRET_WIFI_SSID "YOUR_WIFI_SSID"
+#define SECRET_WIFI_PASS "YOUR_WIFI_PASSWORD"
 ```
 
-Replace those placeholders with your own WiFi network name and password.
+`secrets.h` is gitignored, so your credentials never end up in the repository.
+The same file optionally configures the Controls page integrations (NIM Hub
+time tracking and Hermes Ear recording) — leave those tokens empty to hide
+their controls.
+
+Note: the sketch is large. If your build no longer fits the default
+partition, select **Tools > Partition Scheme > Huge APP (3MB No OTA)** in
+Arduino IDE (or `PartitionScheme=huge_app` with arduino-cli).
 
 ## 6. Select the Correct Board and Port
 
